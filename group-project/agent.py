@@ -2,14 +2,15 @@
 
 Status: State, run_tools, verifier, edge after verifier (pass_fail), email node,
 agent node, route edge and system prompt are written.
-Tools: tools.py (parse_* wrap the group's parser.py). To do: graph wiring, adapter to AgentResult
+Tools: tools.py (parse_* wrap the group's parser.py). Graph: build_graph(). To do: adapter to AgentResult
 (output must come from the agent's last reply, not the email ToolMessage), the six tools.
 """
 import re
 from typing import Annotated, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langgraph.graph import END
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 
@@ -256,3 +257,18 @@ def route(state: State):
     if state["messages"][-1].tool_calls:
         return "tools"
     return "verifier"
+
+
+# ---------------------------------------------------------------- graph
+def build_graph():
+    b = StateGraph(State)
+    b.add_node("agent", agent)
+    b.add_node("tools", run_tools)
+    b.add_node("verifier", verifier)
+    b.add_node("email", email)
+    b.add_edge(START, "agent")
+    b.add_edge("tools", "agent")
+    b.add_edge("email", END)
+    b.add_conditional_edges("agent", route, {"tools": "tools", "verifier": "verifier"})
+    b.add_conditional_edges("verifier", pass_fail, {"email": "email", "agent": "agent", END:END})
+    return b.compile(checkpointer=InMemorySaver())
