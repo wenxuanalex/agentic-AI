@@ -5,3 +5,7 @@ langgraph
 pydantic
 python-dotenv
 pypdf
+pdfplumber
+# tests only (python -m pytest -q tests)
+reportlab
+pytest

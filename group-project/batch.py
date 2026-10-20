@@ -150,6 +150,10 @@ def screen_pair(p: dict):
            "steps": 0, "tokens_in": 0, "tokens_out": 0, "seconds": 0.0, "verifier_notes": "", "answers": ""}
     for k, _, _ in CRITERIA:
         row[k] = None
+    # Guardrail 1: hidden text in the CV is flagged for the human at approval (not auto-rejected).
+    hidden = tools.visible_pdf_text(cv["file"])[1]   # cached, no model call
+    row["hidden_text_chars"] = hidden["hidden_chars"]
+    row["hidden_text_sample"] = hidden["hidden_sample"] if hidden["hidden_chars"] > tools.HIDDEN_FLAG_CHARS else ""
     if cv["status"] != "ok" or jd["status"] != "ok":  # known bad input: no model call
         row["error"] = cv["status"] if cv["status"] != "ok" else jd["status"]
         log(f"{cv['id']} x {jd['id']}: skipped ({row['error'][:50]})")

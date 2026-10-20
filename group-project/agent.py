@@ -196,10 +196,11 @@ def verifier(state: State):
     if "parse_resume" in tools:
         # The quote is what comes AFTER the closing ']' - a requirement can contain quote marks itself.
         resume_content = re.findall(r'^EVIDENCE: \[R\d+:.*\]\s*"(.*)"\s*$', message.content, re.MULTILINE)
-        # A quote counts if it is in the parser's text OR the PDF's own text layer: the parser
-        # (a model) can mix up two-column CVs, so a real quote may be missing from its text.
-        from tools import pdf_text
-        sources = [normalize_text(state["resume"]), normalize_text(pdf_text(state.get("resume_file")))]
+        # Guardrail 1: a quote counts only if it is in the VISIBLE text of the PDF, so hidden
+        # (e.g. white) text can't be used as evidence. Scanned PDFs (no text layer) fall back to
+        # the parser's text or pypdf's text layer.
+        from tools import quote_sources
+        sources = [normalize_text(s) for s in quote_sources(state.get("resume_file"), state.get("resume"))]
         for line in resume_content:
             q = normalize_text(line)
             if not q or not any(q in s for s in sources if s):

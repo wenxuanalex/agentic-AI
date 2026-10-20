@@ -30,6 +30,7 @@ from langgraph.types import Command
 
 import adapter
 import batch
+import tools
 from scoring import CRITERIA
 
 # From the full run on 20 Oct (75 pairs, $1.68 -> ~$0.022/pair); planning used ~18% fewer tokens.
@@ -86,14 +87,22 @@ def main() -> int:
     while "__interrupt__" in out:
         files = {c["id"]: Path(c["file"]).name for c in out["cvs"]}
         roles = {j["id"]: Path(j["file"]).name for j in out["jds"]}
+        # Guardrail 1: CVs with hidden text (white, tiny, off-page, invisible) - for the human to judge.
+        hidden = {r["cv"]: r.get("hidden_text_chars", 0) for r in out["results"]
+                  if r.get("hidden_text_chars", 0) > tools.HIDDEN_FLAG_CHARS}
+        flag = lambda cv_id: f"  HIDDEN TEXT ({hidden[cv_id]} chars)" if cv_id in hidden else ""
         print(f"\nSHORTLIST (top {out['invite_share']:.0%} of valid applicants per JD, by score):")
         for jd_id, ids in out["shortlist"].items():
             print(f"  {jd_id} {roles[jd_id]}")
             for cv_id in ids:
                 row = next(r for r in out["results"] if r["jd"] == jd_id and r["cv"] == cv_id)
-                print(f"      {cv_id} score {row['score']:>5}  {files[cv_id]}")
+                print(f"      {cv_id} score {row['score']:>5}  {files[cv_id]}{flag(cv_id)}")
             if not ids:
                 print("      (nobody: no valid scored candidates)")
+        if hidden:
+            print(f"\nHIDDEN TEXT found in {len(hidden)} CV(s): "
+                  + ", ".join(f"{c} ({n} chars)" for c, n in sorted(hidden.items()))
+                  + ". Hidden text was not used as evidence; see hidden_text_sample in scores.csv.")
         answer = "y" if auto_yes else input(
             "\nSend invitations and rejection emails? [y/N, or a new share like 0.3 to re-rank] ").strip().lower()
         try:
@@ -113,7 +122,7 @@ def main() -> int:
     rank_of = {(jd, cv): i for jd, ids in out["ranking"].items() for i, cv in enumerate(ids, start=1)}
     invited = {(jd, cv) for jd, ids in out["shortlist"].items() for cv in ids}
     cols = (["jd", "jd_file", "cv", "cv_file", "final_label", "score", "rank", "agent_label"] + [k for k, _, _ in CRITERIA]
-            + ["why", "error", "verifier_notes", "answers", "steps", "tokens_in", "tokens_out", "seconds"])
+            + ["why", "hidden_text_chars", "hidden_text_sample", "error", "verifier_notes", "answers", "steps", "tokens_in", "tokens_out", "seconds"])
     rows = sorted(out["results"], key=lambda r: (r["jd"], rank_of.get((r["jd"], r["cv"]), 999), r["cv"]))
     with open(results_dir / "scores.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")

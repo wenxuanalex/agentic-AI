@@ -3,6 +3,7 @@
 - parse_resume / parse_jd: wrappers around the group's PDF parser (parser.py:
   cv_graph / jd_graph). They reshape its output into the formats the verifier
   expects and turn problems into the contract's ERROR codes.
+- visible_pdf_text: guardrail 1 - only text a human can see reaches the agent and the quote checks.
 - normalize_skills / check_timeline: deterministic code (no LLM).
 - email_applicant / email_recruiter / email_invite: MOCKS. They only log; nothing is sent.
 
@@ -108,8 +109,8 @@ _PDF_TEXT: dict = {}
 
 
 def pdf_text(file: str | None) -> str:
-    """The PDF's own text layer (pypdf), no model involved. The verifier also accepts quotes
-    found here, because the parser's model-written text can mix up two-column CVs.
+    """The PDF's own text layer (pypdf), no model involved. It includes HIDDEN text, so it is
+    only a quote source when visible_pdf_text finds no text layer (see quote_sources).
     Returns "" if pypdf is not installed or the file can't be read."""
     if not file:
         return ""
@@ -122,6 +123,153 @@ def pdf_text(file: str | None) -> str:
         return _PDF_TEXT[key]
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------- visible text (guardrail 1)
+# Prompt injection can hide in a resume as text a human never sees (white-on-white, tiny font,
+# off the page, invisible render mode). The parser reads the raw PDF, so it sees that text too.
+# visible_pdf_text keeps only characters a reader can see; the agent quotes from this text and
+# the verifier / soft-skills check accept quotes only from it. Code, not a prompt rule.
+WHITE_MIN = 0.95        # a fill colour with every RGB channel >= this counts as white
+                        # (white text is hidden only on a white background, not on a dark box)
+MIN_FONT_PT = 3         # smaller than this is unreadable
+HIDDEN_FLAG_CHARS = 20  # more hidden characters than this -> "HIDDEN TEXT" flag for the human
+_VISIBLE: dict = {}
+
+
+def _patch_render_mode() -> None:
+    """pdfminer knows each string's text render mode (Tr) but pdfplumber drops it.
+    Copy it onto every char as char["render_mode"] (mode 3 = invisible)."""
+    import pdfplumber.page as pp
+    agg = pp.PDFPageAggregatorWithMarkedContent
+    if getattr(agg, "_render_mode_patched", False):
+        return
+    pp.ALL_ATTRS.add("render_mode")
+    original = agg.render_string
+
+    def render_string(self, textstate, *args, **kwargs):
+        start = len(self.cur_item._objs)
+        original(self, textstate, *args, **kwargs)
+        for obj in self.cur_item._objs[start:]:
+            obj.render_mode = textstate.render
+
+    agg.render_string = render_string
+    agg._render_mode_patched = True
+
+
+def _is_white(color) -> bool:
+    """Fill colour as pdfplumber gives it: (gray,), (r, g, b) or (c, m, y, k). None = black."""
+    if isinstance(color, (int, float)):
+        color = (color,)
+    if not isinstance(color, (tuple, list)) or not all(isinstance(c, (int, float)) for c in color):
+        return False  # no colour or a pattern: can't tell, treat as visible
+    if len(color) == 4:  # CMYK -> RGB
+        c, m, y, k = color
+        color = ((1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k))
+    return len(color) in (1, 3) and all(ch >= WHITE_MIN for ch in color)
+
+
+def _backgrounds(page) -> list[tuple[dict, bool]]:
+    """Filled shapes and images on the page, in drawing order: (object, is it white?).
+    White text on a dark box (a CV header or sidebar) is visible, so it must not be dropped."""
+    shapes = [(o, _is_white(o.get("non_stroking_color"))) for o in page.rects + page.curves if o.get("fill")]
+    return shapes + [(img, False) for img in page.images]  # an image: colour unknown, assume dark
+
+
+def _on_white(ch: dict, backgrounds) -> bool:
+    """Is the char on a white background? Uses the last (topmost) shape under its centre;
+    no shape = the white page."""
+    x, y = (ch["x0"] + ch["x1"]) / 2, (ch["top"] + ch["bottom"]) / 2
+    under = [white for o, white in backgrounds if o["x0"] <= x <= o["x1"] and o["top"] <= y <= o["bottom"]]
+    return under[-1] if under else True
+
+
+def _hidden_reasons(ch: dict, page, backgrounds=()) -> list[str]:
+    reasons = []
+    if _is_white(ch.get("non_stroking_color")) and _on_white(ch, backgrounds):
+        reasons.append("white")
+    if (ch.get("size") or 0) < MIN_FONT_PT:
+        reasons.append("tiny")
+    x, y = (ch["x0"] + ch["x1"]) / 2, (ch["top"] + ch["bottom"]) / 2
+    x0, top, x1, bottom = page.bbox
+    if not (x0 <= x <= x1 and top <= y <= bottom):
+        reasons.append("offpage")
+    if ch.get("render_mode") == 3:
+        reasons.append("invisible")
+    return reasons
+
+
+def visible_pdf_text(file: str | None) -> tuple[str, dict]:
+    """(text a reader can see, report) for a PDF, no model involved.
+    report = {"hidden_chars": n, "hidden_sample": first ~80 hidden chars, "reasons": {reason: n}}.
+    Returns ("", report with 0 hidden chars) if the file can't be read (e.g. no text layer)."""
+    empty = {"hidden_chars": 0, "hidden_sample": "", "reasons": {}}
+    if not file:
+        return "", empty
+    try:
+        path = Path(file)
+        key = (str(path.resolve()), path.stat().st_mtime)
+        if key not in _VISIBLE:
+            import pdfplumber
+            from pdfplumber.utils import extract_text
+            _patch_render_mode()
+            pages, samples, n_hidden, reasons = [], [], 0, {}
+            with pdfplumber.open(str(path)) as pdf:
+                for page in pdf.pages:
+                    hidden, backgrounds = [], _backgrounds(page)
+                    def keep(obj, page=page, backgrounds=backgrounds):
+                        if obj.get("object_type") != "char":
+                            return True
+                        why = _hidden_reasons(obj, page, backgrounds)
+                        if why:
+                            hidden.append(obj)
+                            if obj.get("text", "").strip():  # count real characters, not spaces
+                                for r in why:
+                                    reasons[r] = reasons.get(r, 0) + 1
+                        return not why
+                    pages.append(page.filter(keep).extract_text() or "")
+                    n_hidden += sum(bool(c.get("text", "").strip()) for c in hidden)
+                    if hidden:
+                        samples.append(extract_text(hidden))
+            sample = re.sub(r"\s+", " ", " ".join(samples)).strip()[:80]
+            _VISIBLE[key] = ("\n".join(pages).strip(),
+                             {"hidden_chars": n_hidden, "hidden_sample": sample, "reasons": reasons})
+        text, report = _VISIBLE[key]
+        return text, dict(report)
+    except Exception:
+        return "", empty
+
+
+def has_text_layer(file: str | None) -> bool:
+    """True if the PDF has any text characters (visible or hidden). False e.g. for a scanned PDF:
+    then the old behaviour (parser text + pypdf) is used. A PDF whose text is ALL hidden still
+    counts as having a text layer, so hiding everything can't switch the guardrail off."""
+    text, report = visible_pdf_text(file)
+    return bool(text.strip()) or report["hidden_chars"] > 0
+
+
+def _mask(text: str) -> str:
+    """The parser's sensitive-word masking (sex, age, race, religion), applied to visible text."""
+    import parser
+    return parser.mask_sensitive_text(text) or ""
+
+
+def resume_text_for_agent(file: str, parser_text: str) -> str:
+    """What parse_resume returns: the masked VISIBLE text if the PDF has a text layer,
+    else the parser's full_text (fallback, e.g. a scanned PDF)."""
+    if has_text_layer(file):
+        return _mask(visible_pdf_text(file)[0])
+    return parser_text
+
+
+def quote_sources(file: str | None, parser_text: str | None) -> list[str]:
+    """Texts a quote may come from (verifier and soft-skills check).
+    With a text layer: ONLY the visible text (raw and masked - the agent sees the masked one).
+    Without (scanned PDF): the old sources, the parser's text and pypdf's text layer."""
+    if has_text_layer(file):
+        visible = visible_pdf_text(file)[0]
+        return [visible, _mask(visible)]
+    return [parser_text or "", pdf_text(file)]
 
 
 # ---------------------------------------------------------------- parse tools
@@ -145,8 +293,12 @@ def parse_resume(file: str) -> str:
         return "ERROR: not_a_resume (no resume found in the file)"
     if len(cvs) > 1:
         return f"ERROR: not_a_resume (file contains {len(cvs)} resumes; expected exactly one)"
-    text = (cvs[0].full_text or "").strip()
+    # The parser decides not_a_resume / several CVs; the agent gets the VISIBLE text (guardrail 1),
+    # so it quotes from the same text the verifier checks.
+    text = resume_text_for_agent(file, (cvs[0].full_text or "").strip()).strip()
     if not text:
+        if has_text_layer(file):
+            return "ERROR: unreadable (all text in the PDF is hidden)"
         return "ERROR: unreadable (no text could be extracted)"
     return text
 
