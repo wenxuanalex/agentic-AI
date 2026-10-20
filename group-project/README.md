@@ -117,7 +117,7 @@ python run_checks.py --plan
 The token saving comes from fewer full-context model calls; check the labels match between
 modes so the saving doesn't come from worse decisions.
 
-## Batch job: score every CV against every JD, invite the top 10%
+## Batch job: score every CV against every JD, invite the top 20%
 
 ```bash
 python run_batch.py --limit 2                   # first 2 CVs x all JDs
@@ -148,11 +148,12 @@ START → load_files → screen_pair × (CVs × JDs, in parallel via Send) → r
    | 5 | Relevant skills (preferred) | 2 | share of nice-to-have skills with a verified quote |
    | 6 | Years of experience (preferred) | 1 | candidate years ÷ preferred (max 1) |
 
-3. **rank**, per JD: invite the top **10% of that JD's valid applicants, rounded up**, chosen only from
-   `LABEL: 1` candidates (must-haves stay a hard rule; the score only ranks). A CV can be invited to more
-   than one role. Ties are broken by criterion 1, then 2, and so on.
+3. **rank**, per JD: the top **20% of that JD's valid applicants by score, rounded up**, get final label
+   **1** (invited); everyone else gets **0**. The agent's own `LABEL` (its must-have check) is kept in
+   `scores.csv` as `agent_label` for reference but does not decide (agreed 20 Oct). A CV can be invited
+   to more than one role. Ties are broken by criterion 1, then 2, and so on.
 4. **approve** pauses for a human (`--yes` skips the question). Nothing is sent before approval.
-5. **send_emails** (mocks): `email_invite` to the shortlist, `email_applicant` to everyone else (policy P11).
+5. **send_emails** (mocks): `email_invite` to final label 1, `email_applicant` to final label 0 (policy P11).
 
 The single-case contract and `make_agent_fn` for the evaluator are unchanged; the batch is a layer on top.
 

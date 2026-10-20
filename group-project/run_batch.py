@@ -1,4 +1,4 @@
-"""Batch job: screen and score every CV against every JD, then invite the top 10% per JD.
+"""Batch job: screen and score every CV against every JD, then invite the top 20% per JD.
 
 Usage (from this folder, with OPENAI_API_KEY in .env):
     python run_batch.py                     # data folder defaults to ./data (needs data/cvs and data/jds)
@@ -78,14 +78,14 @@ def main() -> int:
     while "__interrupt__" in out:
         files = {c["id"]: Path(c["file"]).name for c in out["cvs"]}
         roles = {j["id"]: Path(j["file"]).name for j in out["jds"]}
-        print("\nSHORTLIST (top 10% per JD, LABEL 1 only):")
+        print(f"\nSHORTLIST (top {batch.INVITE_SHARE:.0%} of valid applicants per JD, by score):")
         for jd_id, ids in out["shortlist"].items():
             print(f"  {jd_id} {roles[jd_id]}")
             for cv_id in ids:
                 row = next(r for r in out["results"] if r["jd"] == jd_id and r["cv"] == cv_id)
                 print(f"      {cv_id} score {row['score']:>5}  {files[cv_id]}")
             if not ids:
-                print("      (nobody: no LABEL 1 candidates)")
+                print("      (nobody: no valid scored candidates)")
         answer = "y" if auto_yes else input("\nSend invitations and rejection emails? [y/N] ").strip().lower()
         out = graph.invoke(Command(resume="approve" if answer == "y" else "reject"), cfg)
     secs = time.perf_counter() - t0
@@ -95,14 +95,15 @@ def main() -> int:
     results_dir.mkdir(exist_ok=True)
     rank_of = {(jd, cv): i for jd, ids in out["ranking"].items() for i, cv in enumerate(ids, start=1)}
     invited = {(jd, cv) for jd, ids in out["shortlist"].items() for cv in ids}
-    cols = (["jd", "jd_file", "cv", "cv_file", "label", "score", "rank", "invited"] + [k for k, _, _ in CRITERIA]
+    cols = (["jd", "jd_file", "cv", "cv_file", "final_label", "score", "rank", "agent_label"] + [k for k, _, _ in CRITERIA]
             + ["why", "error", "verifier_notes", "answers", "steps", "tokens_in", "tokens_out", "seconds"])
     rows = sorted(out["results"], key=lambda r: (r["jd"], rank_of.get((r["jd"], r["cv"]), 999), r["cv"]))
     with open(results_dir / "scores.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for r in rows:
-            w.writerow({**r, "rank": rank_of.get((r["jd"], r["cv"]), ""), "invited": (r["jd"], r["cv"]) in invited})
+            final = "invalid" if r["label"] not in ("0", "1") else ("1" if (r["jd"], r["cv"]) in invited else "0")
+            w.writerow({**r, "rank": rank_of.get((r["jd"], r["cv"]), ""), "final_label": final, "agent_label": r["label"]})
     with open(results_dir / "shortlist.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["jd", "jd_file", "rank", "cv", "cv_file", "score"])
@@ -114,13 +115,13 @@ def main() -> int:
     tin = sum(r["tokens_in"] for r in out["results"]); tout = sum(r["tokens_out"] for r in out["results"])
     cost = (tin * adapter.PRICE_IN_PER_M + tout * adapter.PRICE_OUT_PER_M) / 1e6
     print("\n" + "=" * 78)
-    print(f"{'JD':<5}{'valid CVs':>10}{'label 1':>9}{'label 0':>9}{'invited':>9}   top scores")
+    print(f"{'JD':<5}{'valid CVs':>10}{'invited (1)':>13}{'not (0)':>9}{'invalid':>9}   invited (score)")
     for jd in out["jds"]:
         rs = [r for r in out["results"] if r["jd"] == jd["id"]]
-        ones = [r for r in rs if r["label"] == "1"]
-        top = ", ".join(f"{cv}:{next(r['score'] for r in ones if r['cv'] == cv)}" for cv in out["ranking"][jd["id"]][:3])
-        print(f"{jd['id']:<5}{sum(r['label'] in ('0', '1') for r in rs):>10}{len(ones):>9}"
-              f"{sum(r['label'] == '0' for r in rs):>9}{len(out['shortlist'][jd['id']]):>9}   {top}")
+        valid = sum(r["label"] in ("0", "1") for r in rs)
+        inv = out["shortlist"][jd["id"]]
+        top = ", ".join(f"{cv}:{next(r['score'] for r in rs if r['cv'] == cv)}" for cv in inv)
+        print(f"{jd['id']:<5}{valid:>10}{len(inv):>13}{valid - len(inv):>9}{len(rs) - valid:>9}   {top}")
     skipped = [c["id"] for c in out["cvs"] if c["status"] != "ok"]
     print(f"\nCV files skipped: {len(skipped)} ({', '.join(skipped) or '-'})")
     print(f"emails: {'sent (mock): ' + str(len(out.get('emails', []))) if out.get('approved') else 'NOT sent (not approved)'}")

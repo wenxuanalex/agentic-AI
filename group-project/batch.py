@@ -8,9 +8,10 @@
                planning on/off) with emails switched off, then scoring.score_pair() -> 0-100.
                Sent out with LangGraph's Send (map-reduce): one task per pair, results are
                collected in `results` by the operator.add reducer.
-- rank:        per JD, invite the top INVITE_SHARE (10%) of that JD's valid applicants,
-               rounded up, chosen only from LABEL 1 candidates (must-haves are a hard rule;
-               the score only ranks). Ties are broken by the criteria in priority order.
+- rank:        per JD, the top INVITE_SHARE (20%) of that JD's valid applicants by score,
+               rounded up, get final label 1 (invited); everyone else gets 0. The agent's own
+               LABEL is kept for reference only - the decision comes from the score (agreed 20 Oct).
+               Ties are broken by the criteria in priority order.
 - approve:     human-in-the-loop pause (interrupt) showing the shortlist. Nothing is sent before it.
 - send_emails: if approved, email_invite to the shortlist; email_applicant (unsuccessful, policy P11)
                to every other valid applicant of that JD. All emails are mocks.
@@ -35,7 +36,7 @@ from langgraph.types import Send, interrupt
 import tools
 from scoring import CRITERIA, rank_key, score_pair
 
-INVITE_SHARE = 0.10
+INVITE_SHARE = 0.20   # top 20% of valid applicants per JD get final label 1
 MAX_CV_PAGES = 8      # the single CVs are 1-4 pages; applicant-system exports are 18-101
 PARSE_WORKERS = 8
 
@@ -56,7 +57,7 @@ class BatchState(TypedDict, total=False):
     jds: list            # [{"id": "J1", "file": ..., "role": ..., "status": ...}]
     results: Annotated[list, operator.add]   # one row per CV x JD pair (filled in parallel)
     shortlist: dict      # jd id -> [cv ids] to invite, best first
-    ranking: dict        # jd id -> all LABEL 1 cv ids, best first
+    ranking: dict        # jd id -> all scored cv ids, best first
     approved: bool
     emails: list
 
@@ -188,9 +189,8 @@ def rank(state: BatchState):
     for jd in state["jds"]:
         valid = [r for r in state["results"] if r["jd"] == jd["id"] and r["label"] in ("0", "1")]
         k = math.ceil(INVITE_SHARE * len(valid)) if valid else 0
-        eligible = sorted([r for r in valid if r["label"] == "1" and r["score"] is not None],
-                          key=rank_key, reverse=True)
-        ranking[jd["id"]] = [r["cv"] for r in eligible]   # LABEL 1 candidates, best first
+        eligible = sorted([r for r in valid if r["score"] is not None], key=rank_key, reverse=True)
+        ranking[jd["id"]] = [r["cv"] for r in eligible]   # every scored candidate, best first
         shortlist[jd["id"]] = ranking[jd["id"]][:k]
     return {"shortlist": shortlist, "ranking": ranking}
 
