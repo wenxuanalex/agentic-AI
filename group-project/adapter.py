@@ -10,6 +10,11 @@ Case input (case.input) is a JSON string (or a dict) naming the two PDFs:
     {"resume": "data/cv/r12.pdf", "jd": "data/jd/j3.pdf", "candidate_id": 12}
 candidate_id is optional (a running number is used if missing).
 
+If the verifier still fails after all retries, output is
+    ERROR: verification_failed
+    LABEL: invalid
+(no decision, no email). AgentResult.error is only for real crashes.
+
 Recruiter emails pause for human approval (interrupt). This adapter AUTO-APPROVES
 every pause by default (resume_value="approve"), like week 6's make_agent_fn.
 Say so in the write-up: the measured runs never exercise a human rejection.
@@ -62,6 +67,8 @@ def _make_result(**kw) -> AgentResult:
 PRICE_IN_PER_M = 0.25
 PRICE_OUT_PER_M = 2.00
 RECURSION_LIMIT = 40  # max node runs per case; a safety net, not the retry rule
+# Output when the verifier still fails after all retries (agreed contract addition).
+RETRIES_EXHAUSTED_OUTPUT = "ERROR: verification_failed\nLABEL: invalid"
 
 _ids = itertools.count(1)
 
@@ -128,7 +135,12 @@ def run_case(task, graph=None, resume_value="approve") -> AgentResult:
     except Exception as e:
         return _make_result(output="", error=f"{type(e).__name__}: {e}",
                            latency_s=time.perf_counter() - t0)
-    return _to_result(out["messages"], candidate_id, time.perf_counter() - t0)
+    result = _to_result(out["messages"], candidate_id, time.perf_counter() - t0)
+    if out.get("pass_fail") is False:
+        # Retries ran out and the verifier never passed: no decision was made and no
+        # email was sent. Report it as its own ERROR code (not a crash in .error).
+        result.output = RETRIES_EXHAUSTED_OUTPUT
+    return result
 
 
 def make_agent_fn(resume_value="approve"):

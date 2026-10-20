@@ -3,7 +3,7 @@
 - parse_resume / parse_jd: wrappers around the group's PDF parser (parser.py:
   cv_graph / jd_graph). They reshape its output into the formats the verifier
   expects and turn problems into the contract's ERROR codes.
-- normalize_skills / check_timeline: simple STAND-INS, to be replaced.
+- normalize_skills / check_timeline: deterministic code (no LLM).
 - email_applicant / email_recruiter: MOCKS. They only log; nothing is sent.
 
 parser.py is imported only when a parse tool is first used, because importing it
@@ -127,57 +127,139 @@ def parse_jd(file: str) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------- stand-ins (replace later)
+# ---------------------------------------------------------------- normalize_skills
+# Deterministic: same input, same output. Keys are lower-case, punctuation-free forms.
 _SYNONYMS = {
-    "ml": "machine learning",
-    "ai": "artificial intelligence",
-    "nlp": "natural language processing",
-    "js": "javascript",
-    "py": "python",
-    "k8s": "kubernetes",
-    "gcp": "google cloud platform",
-    "aws": "amazon web services",
+    # languages
+    "py": "python", "python3": "python", "python 3": "python",
+    "js": "javascript", "ecmascript": "javascript", "node": "node.js", "nodejs": "node.js",
+    "ts": "typescript", "golang": "go", "c sharp": "c#", "csharp": "c#", "cpp": "c++",
+    "r programming": "r", "r language": "r",
+    "postgres": "postgresql", "psql": "postgresql", "mssql": "sql server", "ms sql": "sql server",
+    "t sql": "sql", "tsql": "sql", "structured query language": "sql",
+    # data / ML
+    "ml": "machine learning", "dl": "deep learning", "ai": "artificial intelligence",
+    "nlp": "natural language processing", "cv": "computer vision", "llm": "large language models",
+    "llms": "large language models", "genai": "generative ai", "gen ai": "generative ai",
+    "rl": "reinforcement learning", "stats": "statistics", "statistical analysis": "statistics",
+    "eda": "exploratory data analysis", "etl": "extract transform load",
+    "sklearn": "scikit-learn", "scikit learn": "scikit-learn", "tf": "tensorflow",
+    "torch": "pytorch", "hf": "hugging face", "huggingface": "hugging face",
+    "xgb": "xgboost", "lgbm": "lightgbm", "pyspark": "spark", "apache spark": "spark",
+    "ms excel": "excel", "microsoft excel": "excel", "powerbi": "power bi", "ms power bi": "power bi",
+    "a b testing": "ab testing", "a/b testing": "ab testing",
+    # cloud / engineering
+    "aws": "amazon web services", "gcp": "google cloud platform", "google cloud": "google cloud platform",
+    "azure": "microsoft azure", "k8s": "kubernetes", "ci cd": "ci/cd", "cicd": "ci/cd",
+    "rest api": "rest", "restful": "rest", "restful api": "rest", "git hub": "github",
+    # business
+    "pm": "project management", "hr": "human resources", "ui ux": "ui/ux", "ux ui": "ui/ux",
+    "ms office": "microsoft office",
 }
+_VERSION = re.compile(r"\s*(v?\d+(\.\d+)*)$")
+
+
+def _skill_key(raw: str) -> str:
+    s = raw.strip().lower()
+    s = re.sub(r"[‐-―]", "-", s)            # unify dashes
+    s = re.sub(r"[()\[\]\"'.]", " ", s)      # drop brackets, quotes, full stops
+    s = re.sub(r"[_\-]", " ", s)             # snake/kebab -> spaces (scikit-learn handled by synonyms)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 @tool
 def normalize_skills(skills: str) -> str:
-    """STAND-IN. Map different wordings of skills to one standard name.
-    Input: comma-separated skills, e.g. 'ML, Py, SQL'. Output: comma-separated standard names."""
-    out = []
-    for s in skills.split(","):
-        key = s.strip().lower()
-        if key:
-            out.append(_SYNONYMS.get(key, key))
+    """Map different wordings of skills to one standard name, so the resume and the JD can be
+    compared like for like (e.g. 'ML' and 'Machine-Learning' -> 'machine learning').
+    Input: skills separated by commas, semicolons or new lines. Output: comma-separated standard
+    names, duplicates removed, in first-seen order."""
+    out, seen = [], set()
+    for part in re.split(r"[,;\n]|\s/\s", skills):
+        key = _skill_key(part)
+        if not key:
+            continue
+        name = _SYNONYMS.get(key)
+        if name is None:  # drop a trailing version number: 'Python 3.11' -> 'python'
+            base = _VERSION.sub("", key).strip() or key
+            name = _SYNONYMS.get(base, base)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
     return ", ".join(out)
 
 
-_YEAR_RANGE = re.compile(r"((?:19|20)\d{2})\s*[-–—to]+\s*((?:19|20)\d{2}|present|current|now)", re.IGNORECASE)
+# ---------------------------------------------------------------- check_timeline
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+_DATE = rf"(?:{_MON}\s*'?\d{{2,4}}|\d{{1,2}}\s*/\s*(?:19|20)\d{{2}}|(?:19|20)\d{{2}}\s*/\s*\d{{1,2}}|(?:19|20)\d{{2}})"
+_END = rf"(?:{_DATE}|present|current|now|to date|till date|ongoing)"
+_RANGE = re.compile(rf"({_DATE})\s*(?:-|–|—|to|till|until)\s*({_END})", re.IGNORECASE)
+GAP_MONTHS = 3  # report gaps longer than this
+
+
+def _to_month(text: str, today: tuple[int, int], is_end: bool) -> int | None:
+    """Date text -> months since year 0 (year*12 + month-1)."""
+    t = text.strip().lower()
+    if t in ("present", "current", "now", "to date", "till date", "ongoing"):
+        return today[0] * 12 + today[1] - 1
+    m = re.match(rf"({_MON})\s*'?(\d{{2,4}})$", t)
+    if m:
+        mon = _MONTHS[m.group(1)[:3]]
+        yr = int(m.group(2)); yr = yr + 2000 if yr < 100 and yr <= today[0] % 100 else (yr + 1900 if yr < 100 else yr)
+        return yr * 12 + mon - 1
+    m = re.match(r"(\d{1,2})\s*/\s*((?:19|20)\d{2})$", t)
+    if m:
+        return int(m.group(2)) * 12 + int(m.group(1)) - 1
+    m = re.match(r"((?:19|20)\d{2})\s*/\s*(\d{1,2})$", t)
+    if m:
+        return int(m.group(1)) * 12 + int(m.group(2)) - 1
+    m = re.match(r"((?:19|20)\d{2})$", t)
+    if m:  # year only: from January / to December
+        return int(m.group(1)) * 12 + (11 if is_end else 0)
+    return None
+
+
+def _fmt(month_index: int) -> str:
+    return f"{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][month_index % 12]} {month_index // 12}"
 
 
 @tool
 def check_timeline(jobs: str) -> str:
-    """STAND-IN. Work out total years of experience, gaps and overlaps from job date
-    ranges such as '2019-2021' or '2021 - present'. Input: the jobs section as text."""
+    """Work out total years of experience, gaps and overlaps from job date ranges in the
+    resume's work history (e.g. 'Jan 2019 - Mar 2021', '2019-2021', '03/2021 - present').
+    Overlapping jobs are counted once. Input: the work-history text. Use the result for
+    'years of experience' requirements."""
     import datetime
+    d = datetime.date.today()
+    today = (d.year, d.month)
 
-    this_year = datetime.date.today().year
     spans = []
-    for start, end in _YEAR_RANGE.findall(jobs):
-        e = this_year if not end[:2].isdigit() else int(end)
-        spans.append((int(start), e))
+    for start_txt, end_txt in _RANGE.findall(jobs):
+        s = _to_month(start_txt, today, is_end=False)
+        e = _to_month(end_txt, today, is_end=True)
+        if s is not None and e is not None and e >= s:
+            spans.append((s, e + 1))  # end month inclusive -> half-open
     if not spans:
-        return "No date ranges found."
+        return "No date ranges found in the text."
+
     spans.sort()
-    years = sum(e - s for s, e in spans)
-    gaps, overlaps = [], []
-    for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
-        if s2 > e1:
-            gaps.append(f"{e1}-{s2}")
-        elif s2 < e1:
-            overlaps.append(f"{s2}-{min(e1, e2)}")
-    return (f"Total years (sum of ranges): {years}. "
-            f"Gaps: {', '.join(gaps) or 'none'}. Overlaps: {', '.join(overlaps) or 'none'}.")
+    merged, overlaps, gaps = [list(spans[0])], [], []
+    for s, e in spans[1:]:
+        last = merged[-1]
+        if s < last[1]:  # overlaps the previous block
+            overlaps.append(f"{_fmt(s)} to {_fmt(min(e, last[1]) - 1)}")
+            last[1] = max(last[1], e)
+        else:
+            if s - last[1] > GAP_MONTHS:
+                gaps.append(f"{_fmt(last[1])} to {_fmt(s - 1)} ({s - last[1]} months)")
+            merged.append([s, e])
+    total_months = sum(e - s for s, e in merged)
+    return (f"Total experience: {total_months // 12} years {total_months % 12} months "
+            f"(overlapping jobs counted once; {len(spans)} date range(s) found). "
+            f"Gaps over {GAP_MONTHS} months: {'; '.join(gaps) or 'none'}. "
+            f"Overlaps: {'; '.join(overlaps) or 'none'}.")
 
 
 # ---------------------------------------------------------------- email mocks
