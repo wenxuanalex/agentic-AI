@@ -27,8 +27,10 @@ from tools import (parse_resume, parse_jd, normalize_skills, check_timeline,
                    email_applicant, email_recruiter)
 
 load_dotenv(Path(__file__).parent / ".env")  # OPENAI_API_KEY (and optional OPENAI_API_BASE_URL)
-# Same model and settings as the group's parser.py
-model = init_chat_model("openai:gpt-5-mini", temperature=0, use_responses_api=True,
+# Same model as the group's parser.py. Chat Completions (not the Responses API), so replies
+# come back as plain text, which the verifier's regex checks need. gpt-5 models ignore
+# temperature (LangChain drops it), so runs are not deterministic.
+model = init_chat_model("openai:gpt-5-mini", use_responses_api=False,
                         base_url=os.getenv("OPENAI_API_BASE_URL"))
 model_with_tools = model.bind_tools([parse_resume, parse_jd, normalize_skills, check_timeline])
 tools_by_name = {"parse_resume": parse_resume, "parse_jd": parse_jd, "normalize_skills": normalize_skills, "check_timeline": check_timeline, "email_applicant": email_applicant, "email_recruiter": email_recruiter}
