@@ -8,11 +8,13 @@
                planning on/off) with emails switched off, then scoring.score_pair() -> 0-100.
                Sent out with LangGraph's Send (map-reduce): one task per pair, results are
                collected in `results` by the operator.add reducer.
-- rank:        per JD, the top INVITE_SHARE (20%) of that JD's valid applicants by score,
+- rank:        per JD, the top `invite_share` (default 20%, set by the user) of that JD's valid applicants by score,
                rounded up, get final label 1 (invited); everyone else gets 0. The agent's own
                LABEL is kept for reference only - the decision comes from the score (agreed 20 Oct).
                Ties are broken by the criteria in priority order.
 - approve:     human-in-the-loop pause (interrupt) showing the shortlist. Nothing is sent before it.
+               Resume with "approve", "reject", or {"invite_share": 0.3} to re-rank with a new share
+               and pause again - no new screening, so changing the share costs nothing.
 - send_emails: if approved, email_invite to the shortlist; email_applicant (unsuccessful, policy P11)
                to every other valid applicant of that JD. All emails are mocks.
 
@@ -31,12 +33,12 @@ from typing import Annotated, TypedDict
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send, interrupt
+from langgraph.types import Command, Send, interrupt
 
 import tools
 from scoring import CRITERIA, rank_key, score_pair
 
-INVITE_SHARE = 0.20   # top 20% of valid applicants per JD get final label 1
+INVITE_SHARE = 0.20   # DEFAULT share of valid applicants per JD who get final label 1 (user can change it)
 MAX_CV_PAGES = 8      # the single CVs are 1-4 pages; applicant-system exports are 18-101
 PARSE_WORKERS = 8
 
@@ -53,6 +55,7 @@ class BatchState(TypedDict, total=False):
     planning: bool
     cv_ids: list         # optional: only these CVs (e.g. ["C07", "C12"]); empty = all
     jd_ids: list         # optional: only these JDs
+    invite_share: float  # share of valid applicants per JD to invite (0-1); default INVITE_SHARE
     cvs: list            # [{"id": "C01", "num": 1, "file": ..., "status": "ok" | "ERROR: ..."}]
     jds: list            # [{"id": "J1", "file": ..., "role": ..., "status": ...}]
     results: Annotated[list, operator.add]   # one row per CV x JD pair (filled in parallel)
@@ -184,21 +187,42 @@ def screen_pair(p: dict):
     return {"results": [row]}
 
 
-def rank(state: BatchState):
+def check_share(share) -> float:
+    """invite_share must be a number in (0, 1]. Raises ValueError otherwise (for the UI to show)."""
+    share = float(share)
+    if not 0 < share <= 1:
+        raise ValueError(f"invite_share must be between 0 and 1 (e.g. 0.2 for 20%), got {share}")
+    return share
+
+
+def rank_results(results: list, jds: list, invite_share: float = INVITE_SHARE) -> tuple[dict, dict]:
+    """Pure function (no model calls): per JD, rank every scored valid candidate and take the
+    top invite_share, rounded up. Returns (shortlist, ranking). A UI can call this directly on
+    saved results to preview a different share instantly."""
+    share = check_share(invite_share)
     shortlist, ranking = {}, {}
-    for jd in state["jds"]:
-        valid = [r for r in state["results"] if r["jd"] == jd["id"] and r["label"] in ("0", "1")]
-        k = math.ceil(INVITE_SHARE * len(valid)) if valid else 0
+    for jd in jds:
+        valid = [r for r in results if r["jd"] == jd["id"] and r["label"] in ("0", "1")]
+        k = math.ceil(share * len(valid)) if valid else 0
         eligible = sorted([r for r in valid if r["score"] is not None], key=rank_key, reverse=True)
         ranking[jd["id"]] = [r["cv"] for r in eligible]   # every scored candidate, best first
         shortlist[jd["id"]] = ranking[jd["id"]][:k]
-    return {"shortlist": shortlist, "ranking": ranking}
+    return shortlist, ranking
+
+
+def rank(state: BatchState):
+    share = state.get("invite_share") or INVITE_SHARE
+    shortlist, ranking = rank_results(state["results"], state["jds"], share)
+    return {"shortlist": shortlist, "ranking": ranking, "invite_share": share}
 
 
 def approve(state: BatchState):
-    """Human approval before ANY email goes out."""
-    decision = interrupt({"shortlist": state["shortlist"]})
-    return {"approved": decision == "approve"}
+    """Human approval before ANY email goes out. The pause shows the shortlist and the share.
+    Resume with "approve" / "reject", or {"invite_share": x} to re-rank and pause again."""
+    decision = interrupt({"shortlist": state["shortlist"], "invite_share": state["invite_share"]})
+    if isinstance(decision, dict) and "invite_share" in decision:
+        return Command(goto="rank", update={"invite_share": check_share(decision["invite_share"])})
+    return Command(goto="send_emails", update={"approved": decision == "approve"})
 
 
 def send_emails(state: BatchState):
@@ -225,12 +249,11 @@ def build_batch_graph():
     b.add_node("load_files", load_files)
     b.add_node("screen_pair", screen_pair)
     b.add_node("rank", rank)
-    b.add_node("approve", approve)
+    b.add_node("approve", approve, destinations=("rank", "send_emails"))
     b.add_node("send_emails", send_emails)
     b.add_edge(START, "load_files")
     b.add_conditional_edges("load_files", fan_out, ["screen_pair"])
     b.add_edge("screen_pair", "rank")
-    b.add_edge("rank", "approve")
-    b.add_edge("approve", "send_emails")
+    b.add_edge("rank", "approve")   # approve -> send_emails or back to rank: chosen by its Command
     b.add_edge("send_emails", END)
     return b.compile(checkpointer=InMemorySaver())

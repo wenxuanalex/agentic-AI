@@ -6,6 +6,8 @@ Usage (from this folder, with OPENAI_API_KEY in .env):
     python run_batch.py --plan              # planning mode for each screening run
     python run_batch.py --yes               # approve the shortlist without asking
     python run_batch.py --workers 4         # pairs screened at the same time (default 8)
+    python run_batch.py --top 0.3           # invite the top 30% per JD (default 0.2 = 20%)
+    At the approval question you can also type a new share (e.g. 0.3) to re-rank for free.
     python run_batch.py --limit 3           # only the first 3 CVs (C01-C03)
     python run_batch.py --cvs C07,C12 --jds J1,J4   # only these CVs x these JDs
     Before spending anything it shows the number of pairs and an estimated cost, and asks to go
@@ -18,6 +20,7 @@ Writes (inside the data folder, which is gitignored - the files hold applicant f
 from __future__ import annotations
 
 import csv
+import re
 import sys
 import time
 import uuid
@@ -44,9 +47,14 @@ def _arg(flag: str, default):
 def main() -> int:
     planning, auto_yes = "--plan" in sys.argv, "--yes" in sys.argv
     workers, limit = _arg("--workers", 8), _arg("--limit", 0)
+    try:
+        invite_share = batch.check_share(_arg("--top", batch.INVITE_SHARE))
+    except ValueError as e:
+        print(e)
+        return 1
     cv_ids = [x.strip().upper() for x in _arg("--cvs", "").split(",") if x.strip()]
     jd_ids = [x.strip().upper() for x in _arg("--jds", "").split(",") if x.strip()]
-    skip = {"--workers", "--limit", "--cvs", "--jds"}
+    skip = {"--workers", "--limit", "--cvs", "--jds", "--top"}
     pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and sys.argv[i - 1] not in skip]
     data = Path(pos[0]) if pos else Path(__file__).parent / "data"
     if not (data / "cvs").is_dir() or not (data / "jds").is_dir():
@@ -72,13 +80,13 @@ def main() -> int:
            "max_concurrency": workers, "recursion_limit": 50}
     t0 = time.perf_counter()
     out = graph.invoke({"data_dir": str(run_dir), "planning": planning, "results": [],
-                        "cv_ids": cv_ids, "jd_ids": jd_ids}, cfg)
+                        "cv_ids": cv_ids, "jd_ids": jd_ids, "invite_share": invite_share}, cfg)
 
     # ---- human approval of the shortlist (interrupt)
     while "__interrupt__" in out:
         files = {c["id"]: Path(c["file"]).name for c in out["cvs"]}
         roles = {j["id"]: Path(j["file"]).name for j in out["jds"]}
-        print(f"\nSHORTLIST (top {batch.INVITE_SHARE:.0%} of valid applicants per JD, by score):")
+        print(f"\nSHORTLIST (top {out['invite_share']:.0%} of valid applicants per JD, by score):")
         for jd_id, ids in out["shortlist"].items():
             print(f"  {jd_id} {roles[jd_id]}")
             for cv_id in ids:
@@ -86,8 +94,17 @@ def main() -> int:
                 print(f"      {cv_id} score {row['score']:>5}  {files[cv_id]}")
             if not ids:
                 print("      (nobody: no valid scored candidates)")
-        answer = "y" if auto_yes else input("\nSend invitations and rejection emails? [y/N] ").strip().lower()
-        out = graph.invoke(Command(resume="approve" if answer == "y" else "reject"), cfg)
+        answer = "y" if auto_yes else input(
+            "\nSend invitations and rejection emails? [y/N, or a new share like 0.3 to re-rank] ").strip().lower()
+        try:
+            resume = {"invite_share": batch.check_share(answer)}   # a number -> re-rank, no new screening
+        except ValueError:
+            if re.fullmatch(r"[\d.]+", answer):
+                print("Share must be between 0 and 1 (e.g. 0.3) - try again.")
+                resume = {"invite_share": out["invite_share"]}
+            else:
+                resume = "approve" if answer == "y" else "reject"
+        out = graph.invoke(Command(resume=resume), cfg)
     secs = time.perf_counter() - t0
 
     # ---- write results

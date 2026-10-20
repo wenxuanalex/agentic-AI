@@ -153,6 +153,14 @@ START → load_files → screen_pair × (CVs × JDs, in parallel via Send) → r
    `scores.csv` as `agent_label` for reference but does not decide (agreed 20 Oct). A CV can be invited
    to more than one role. Ties are broken by criterion 1, then 2, and so on.
 4. **approve** pauses for a human (`--yes` skips the question). Nothing is sent before approval.
+
+**Changing the 20% (for the front-end).** The share is a setting, not fixed in code:
+- start a run with it: `run_batch.py --top 0.3`, or `{"invite_share": 0.3, ...}` in the graph input;
+- change it at the approval pause: resume with `Command(resume={"invite_share": 0.3})`. The graph goes back
+  to `rank`, re-ranks the scores it already has and pauses again - **no new screening, no cost**. Resume
+  with `"approve"` or `"reject"` to finish. (In the terminal: type `0.3` at the approval question.)
+- preview without the graph: `batch.rank_results(results, jds, 0.3)` returns `(shortlist, ranking)`.
+- values must be between 0 and 1; anything else raises `ValueError` with a message the UI can show.
 5. **send_emails** (mocks): `email_invite` to final label 1, `email_applicant` to final label 0 (policy P11).
 
 The single-case contract and `make_agent_fn` for the evaluator are unchanged; the batch is a layer on top.
