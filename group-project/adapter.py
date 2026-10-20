@@ -121,8 +121,9 @@ def _to_result(messages: list, candidate_id: int, latency: float) -> AgentResult
 
 
 # ---------------------------------------------------------------- public API
-def run_case(task, graph=None, resume_value="approve", planning=False) -> AgentResult:
-    """Run one case end to end and return its AgentResult. Crashes go in .error."""
+def run_case(task, graph=None, resume_value="approve", planning=False, trace: dict | None = None) -> AgentResult:
+    """Run one case end to end and return its AgentResult. Crashes go in .error.
+    trace: optional dict; if given, the final messages are stored in trace["messages"] (for debugging)."""
     t0 = time.perf_counter()
     graph = graph or screening.build_graph(planning=planning)
     cfg = {"configurable": {"thread_id": f"eval-{uuid.uuid4().hex[:8]}"},  # fresh thread per run
@@ -137,6 +138,8 @@ def run_case(task, graph=None, resume_value="approve", planning=False) -> AgentR
     except Exception as e:
         return _make_result(output="", error=f"{type(e).__name__}: {e}",
                            latency_s=time.perf_counter() - t0)
+    if trace is not None:
+        trace["messages"] = out["messages"]
     result = _to_result(out["messages"], candidate_id, time.perf_counter() - t0)
     if out.get("pass_fail") is False:
         # Retries ran out and the verifier never passed: no decision was made and no

@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, TypedDict
 
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send, interrupt
@@ -128,7 +129,7 @@ def screen_pair(p: dict):
     cv, jd = p["cv"], p["jd"]
     row = {"jd": jd["id"], "cv": cv["id"], "cv_num": cv["num"], "jd_file": Path(jd["file"]).name,
            "cv_file": Path(cv["file"]).name, "label": "invalid", "score": None, "error": "",
-           "steps": 0, "tokens_in": 0, "tokens_out": 0, "seconds": 0.0}
+           "steps": 0, "tokens_in": 0, "tokens_out": 0, "seconds": 0.0, "verifier_notes": ""}
     for k, _, _ in CRITERIA:
         row[k] = None
     if cv["status"] != "ok" or jd["status"] != "ok":  # known bad input: no model call
@@ -137,7 +138,11 @@ def screen_pair(p: dict):
         return {"results": [row]}
 
     task = {"resume": cv["file"], "jd": jd["file"], "candidate_id": cv["num"]}
-    r = adapter.run_case(task, graph=screening_graph(p["planning"]))
+    trace = {}
+    r = adapter.run_case(task, graph=screening_graph(p["planning"]), trace=trace)
+    # The verifier's feedback notes (HumanMessages after the first task message), for debugging.
+    notes = [m.content for m in trace.get("messages", []) if isinstance(m, HumanMessage)][1:]
+    row["verifier_notes"] = " || ".join(n.replace("\n", " | ") for n in notes)[:2000]
     row.update(label=_label(r.output), steps=r.steps, tokens_in=r.input_tokens,
                tokens_out=r.output_tokens, seconds=round(r.latency_s, 1), error=r.error or "")
     errs = re.findall(r"ERROR: (\S+)", r.output)
