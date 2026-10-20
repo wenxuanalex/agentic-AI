@@ -5,8 +5,12 @@ agent node, route edge and system prompt are written.
 Tools: tools.py (parse_* wrap the group's parser.py). Graph: build_graph(). To do: adapter to AgentResult
 (output must come from the agent's last reply, not the email ToolMessage), the six tools.
 """
+import os
 import re
+from pathlib import Path
 from typing import Annotated, TypedDict
+
+from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -18,11 +22,14 @@ from langgraph.types import interrupt
 POLICY_CLAUSES = ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11")
 RETRY_LIMIT = 2
 # ---------------------------------------------------------------- model + tools
-from langchain.chat_models import init_chat_model  # needs GROQ_API_KEY
+from langchain.chat_models import init_chat_model
 from tools import (parse_resume, parse_jd, normalize_skills, check_timeline,
                    email_applicant, email_recruiter)
 
-model = init_chat_model("groq:openai/gpt-oss-120b", temperature=0)
+load_dotenv(Path(__file__).parent / ".env")  # OPENAI_API_KEY (and optional OPENAI_API_BASE_URL)
+# Same model and settings as the group's parser.py
+model = init_chat_model("openai:gpt-5-mini", temperature=0, use_responses_api=True,
+                        base_url=os.getenv("OPENAI_API_BASE_URL"))
 model_with_tools = model.bind_tools([parse_resume, parse_jd, normalize_skills, check_timeline])
 tools_by_name = {"parse_resume": parse_resume, "parse_jd": parse_jd, "normalize_skills": normalize_skills, "check_timeline": check_timeline, "email_applicant": email_applicant, "email_recruiter": email_recruiter}
 
