@@ -2,7 +2,7 @@
 
 Status: State, run_tools, verifier, edge after verifier (pass_fail), email node,
 agent node, route edge and system prompt are written.
-To do: model setup, graph wiring, adapter to AgentResult
+Tools: tools.py (parse_* wrap the group's parser.py). To do: graph wiring, adapter to AgentResult
 (output must come from the agent's last reply, not the email ToolMessage), the six tools.
 """
 import re
@@ -16,8 +16,14 @@ from langgraph.types import interrupt
 # ---------------------------------------------------------------- constants
 POLICY_CLAUSES = ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11")
 RETRY_LIMIT = 2
-tools_by_name = {}  # TODO: map each tool's name to the tool (all six tools)
-model_with_tools = None  # TODO: get_model().bind_tools([parse_resume, parse_jd, normalize_skills, check_timeline])
+# ---------------------------------------------------------------- model + tools
+from langchain.chat_models import init_chat_model  # needs GROQ_API_KEY
+from tools import (parse_resume, parse_jd, normalize_skills, check_timeline,
+                   email_applicant, email_recruiter)
+
+model = init_chat_model("groq:openai/gpt-oss-120b", temperature=0)
+model_with_tools = model.bind_tools([parse_resume, parse_jd, normalize_skills, check_timeline])
+tools_by_name = {"parse_resume": parse_resume, "parse_jd": parse_jd, "normalize_skills": normalize_skills, "check_timeline": check_timeline, "email_applicant": email_applicant, "email_recruiter": email_recruiter}
 
 
 # ---------------------------------------------------------------- system prompt
