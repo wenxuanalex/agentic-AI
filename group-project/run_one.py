@@ -1,7 +1,7 @@
 """Run the screening agent on ONE resume and ONE job description, and print the result.
 
 Usage (from this folder, with OPENAI_API_KEY in .env):
-    python run_one.py <resume.pdf> <jd.pdf> [candidate_id]
+    python run_one.py <resume.pdf> <jd.pdf> [candidate_id] [--plan]
 
 The recruiter-email approval pause is auto-approved here (same as the eval adapter).
 """
@@ -12,12 +12,15 @@ from adapter import run_case
 
 
 def main(argv):
+    planning = "--plan" in argv
+    argv = [a for a in argv if a != "--plan"]
     if len(argv) < 3:
         print(__doc__)
         return 1
     task = json.dumps({"resume": argv[1], "jd": argv[2],
                        "candidate_id": int(argv[3]) if len(argv) > 3 else 1})
-    r = run_case(task)
+    r = run_case(task, planning=planning)
+    print("planning   :", "ON" if planning else "off (baseline)")
 
     print("=" * 70)
     print("OUTPUT (agent's final answer)")

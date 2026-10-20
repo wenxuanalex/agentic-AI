@@ -3,6 +3,7 @@
 Usage (from this folder, with OPENAI_API_KEY in .env):
     python run_checks.py                      # data folder defaults to ~/Downloads/data (1)/data
     python run_checks.py /path/to/data        # folder containing cv/ and jd/
+    python run_checks.py --plan               # same checks with planning ON
 
 Each case takes about 1-2 minutes. Recruiter-email pauses are auto-approved (as in the eval adapter).
 """
@@ -13,7 +14,9 @@ from pathlib import Path
 
 from adapter import run_case
 
-DATA = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "Downloads" / "data (1)" / "data"
+PLANNING = "--plan" in sys.argv
+_args = [a for a in sys.argv[1:] if a != "--plan"]
+DATA = Path(_args[0]) if _args else Path.home() / "Downloads" / "data (1)" / "data"
 
 # (name, resume file, jd file, expected label, expected email tool or None, why)
 CASES = [
@@ -31,10 +34,11 @@ def main() -> int:
     if not (DATA / "cv").is_dir():
         print(f"Can't find {DATA}/cv - pass the data folder as an argument.")
         return 1
+    print("planning:", "ON" if PLANNING else "off (baseline)")
     rows = []
     for i, (name, cv, jd, want_label, want_email, why) in enumerate(CASES, start=1):
         print(f"\n[{i}/{len(CASES)}] {name}: {why} ...", flush=True)
-        r = run_case(json.dumps({"resume": str(DATA / cv), "jd": str(DATA / jd), "candidate_id": i}))
+        r = run_case(json.dumps({"resume": str(DATA / cv), "jd": str(DATA / jd), "candidate_id": i}), planning=PLANNING)
         labels = re.findall(r"LABEL: (.*)", r.output)
         label = labels[-1].strip() if labels else "(none)"
         errors = re.findall(r"ERROR: (\S+)", r.output)

@@ -87,7 +87,8 @@ def _text(content) -> str:
 
 
 def _to_result(messages: list, candidate_id: int, latency: float) -> AgentResult:
-    ai = [m for m in messages if isinstance(m, AIMessage)]
+    ai_all = [m for m in messages if isinstance(m, AIMessage)]
+    ai = [m for m in ai_all if m.name != "plan_executor"]  # model turns only
 
     # output = the agent's LAST answer (an AIMessage with no tool requests),
     # not messages[-1], which is the email ToolMessage when an email was sent.
@@ -95,7 +96,7 @@ def _to_result(messages: list, candidate_id: int, latency: float) -> AgentResult
     output = _text(finals[-1].content) if finals else ""
 
     # tool_calls / tool_args: one entry per tool that actually ran, in order.
-    args_by_id = {tc["id"]: tc["args"] for m in ai for tc in m.tool_calls}
+    args_by_id = {tc["id"]: tc["args"] for m in ai_all for tc in m.tool_calls}
     tool_calls, tool_args = [], []
     for m in messages:
         if isinstance(m, ToolMessage):
@@ -120,16 +121,17 @@ def _to_result(messages: list, candidate_id: int, latency: float) -> AgentResult
 
 
 # ---------------------------------------------------------------- public API
-def run_case(task, graph=None, resume_value="approve") -> AgentResult:
+def run_case(task, graph=None, resume_value="approve", planning=False) -> AgentResult:
     """Run one case end to end and return its AgentResult. Crashes go in .error."""
     t0 = time.perf_counter()
-    graph = graph or screening.build_graph()
+    graph = graph or screening.build_graph(planning=planning)
     cfg = {"configurable": {"thread_id": f"eval-{uuid.uuid4().hex[:8]}"},  # fresh thread per run
            "recursion_limit": RECURSION_LIMIT}
     try:
         resume, jd, candidate_id = _parse_input(task)
         start = HumanMessage(f"Screen the resume at {resume} against the job description at {jd}.")
-        out = graph.invoke({"messages": [start], "candidate_id": candidate_id}, cfg)
+        out = graph.invoke({"messages": [start], "candidate_id": candidate_id,
+                            "resume_file": resume, "jd_file": jd}, cfg)
         while "__interrupt__" in out:  # recruiter-email approval pause
             out = graph.invoke(Command(resume=resume_value), cfg)
     except Exception as e:
@@ -143,7 +145,8 @@ def run_case(task, graph=None, resume_value="approve") -> AgentResult:
     return result
 
 
-def make_agent_fn(resume_value="approve"):
-    """agent_fn for run_eval: builds the graph once and reuses it across cases."""
-    graph = screening.build_graph()
+def make_agent_fn(resume_value="approve", planning=False):
+    """agent_fn for run_eval: builds the graph once and reuses it across cases.
+    planning=True runs the planning version (see planning.py) - use it for the baseline comparison."""
+    graph = screening.build_graph(planning=planning)
     return lambda task: run_case(task, graph=graph, resume_value=resume_value)

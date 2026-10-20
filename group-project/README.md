@@ -87,6 +87,36 @@ LABEL: invalid
 **Not deterministic:** gpt-5-mini ignores `temperature`, so repeat runs can differ — that is what your
 pass rate ± SD measures.
 
+## Planning mode (on/off switch) and the baseline
+
+```python
+make_agent_fn(planning=False)   # baseline: the agent picks tools step by step
+make_agent_fn(planning=True)    # planning: plan first, check it in code, run it, answer once
+```
+
+```
+START → planner → execute_plan → agent → verifier → (email | END | back to agent)
+```
+
+- **planner** — one small model call (task + tool list, no policy text) lists the tools to run.
+- **check_plan** — a hard rule in code (week 5): only the four loop tools, both parse tools,
+  at most 4 steps, never an email tool. A rejected plan falls back to `parse_resume, parse_jd`.
+- **execute_plan** — code runs the plan, no model call per tool. If a parse tool returns
+  `ERROR`, the rest of the plan is skipped.
+- **agent** — one model call writes the final answer. Same output format, verifier, retries
+  and emails as the baseline, so graders don't change.
+
+Compare the two (tokens, cost, model turns, time, labels):
+
+```bash
+python compare_planning.py --runs 3        # writes planning_comparison.csv
+python run_one.py <resume.pdf> <jd.pdf> --plan
+python run_checks.py --plan
+```
+
+The token saving comes from fewer full-context model calls; check the labels match between
+modes so the saving doesn't come from worse decisions.
+
 ## How it works
 
 ```
@@ -101,7 +131,8 @@ START → agent ⇄ tools → verifier ─┬→ email → END        (pass, lab
 | `tools.py` | `parse_resume` / `parse_jd` (wrap `parser.py`), `normalize_skills`, `check_timeline`, email mocks |
 | `adapter.py` | `run_case()` / `make_agent_fn()` → `AgentResult` for the harness |
 | `parser.py`, `paths.py` | Group mate's PDF parser (CV/JD extraction + sensitive-word masking) |
-| `run_one.py`, `run_checks.py` | Command-line runners |
+| `planning.py` | Planning mode: planner, `check_plan`, plan executor, answer node |
+| `run_one.py`, `run_checks.py`, `compare_planning.py` | Command-line runners (all take `--plan`; compare runs both) |
 
 **The verifier** (code, not the model) checks every final answer before any email: both parse tools
 ran; one `EVIDENCE` line per requirement with quotes that really appear in the resume; a valid `LABEL`;

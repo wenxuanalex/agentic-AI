@@ -120,6 +120,10 @@ class State(TypedDict, total=False):
     pass_fail: bool
     label: str
     candidate_id: int
+    resume_file: str    # set by the adapter at the start (used in planning mode)
+    jd_file: str
+    plan: list          # planning mode: the checked plan
+    plan_status: str
 
 
 # ---------------------------------------------------------------- nodes
@@ -269,13 +273,26 @@ def route(state: State):
 
 
 # ---------------------------------------------------------------- graph
-def build_graph():
+def build_graph(planning: bool = False):
+    """planning=False: the agent picks tools step by step (baseline).
+    planning=True:  planner -> check_plan (code) -> execute_plan (code) -> one answer call."""
     b = StateGraph(State)
-    b.add_node("agent", agent)
+    if planning:
+        from planning import planner, execute_plan, answer
+        b.add_node("planner", planner)
+        b.add_node("execute_plan", execute_plan)
+        b.add_node("agent", answer)
+    else:
+        b.add_node("agent", agent)
     b.add_node("tools", run_tools)
     b.add_node("verifier", verifier)
     b.add_node("email", email)
-    b.add_edge(START, "agent")
+    if planning:
+        b.add_edge(START, "planner")
+        b.add_edge("planner", "execute_plan")
+        b.add_edge("execute_plan", "agent")
+    else:
+        b.add_edge(START, "agent")
     b.add_edge("tools", "agent")
     b.add_edge("email", END)
     b.add_conditional_edges("agent", route, {"tools": "tools", "verifier": "verifier"})
