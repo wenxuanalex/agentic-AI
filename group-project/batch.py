@@ -120,6 +120,13 @@ def load_files(state: BatchState):
     jobs = [(c, "cv") for c in cvs if c["status"] == "ok"] + [(j, "jd") for j in jds]
     with ThreadPoolExecutor(PARSE_WORKERS) as pool:
         list(pool.map(lambda a: parse(*a), jobs))
+    # Debug: save what the agent sees (parser output) - <data>/results/parsed/ (gitignored, private).
+    out_dir = data / "results" / "parsed"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for item, kind in jobs:
+        if item["status"] == "ok":
+            tool = tools.parse_resume if kind == "cv" else tools.parse_jd
+            (out_dir / f"{item['id']}.txt").write_text(tool.invoke({"file": item["file"]}))  # cached
     log(f"{sum(c['status'] == 'ok' for c in cvs)}/{len(cvs)} CVs and "
         f"{sum(j['status'] == 'ok' for j in jds)}/{len(jds)} JDs usable")
     return {"cvs": cvs, "jds": jds}
@@ -136,7 +143,7 @@ def screen_pair(p: dict):
     cv, jd = p["cv"], p["jd"]
     row = {"jd": jd["id"], "cv": cv["id"], "cv_num": cv["num"], "jd_file": Path(jd["file"]).name,
            "cv_file": Path(cv["file"]).name, "label": "invalid", "score": None, "error": "",
-           "steps": 0, "tokens_in": 0, "tokens_out": 0, "seconds": 0.0, "verifier_notes": ""}
+           "steps": 0, "tokens_in": 0, "tokens_out": 0, "seconds": 0.0, "verifier_notes": "", "answers": ""}
     for k, _, _ in CRITERIA:
         row[k] = None
     if cv["status"] != "ok" or jd["status"] != "ok":  # known bad input: no model call
@@ -150,6 +157,13 @@ def screen_pair(p: dict):
     # The verifier's feedback notes (HumanMessages after the first task message), for debugging.
     notes = [m.content for m in trace.get("messages", []) if isinstance(m, HumanMessage)][1:]
     row["verifier_notes"] = " || ".join(n.replace("\n", " | ") for n in notes)[:2000]
+    # Debug: every answer the model wrote (length + ending), to see e.g. an empty or cut-off answer.
+    from langchain_core.messages import AIMessage
+    answers = [m for m in trace.get("messages", []) if isinstance(m, AIMessage) and not m.tool_calls
+               and m.name not in ("planner", "plan_executor")]
+    row["answers"] = " || ".join(
+        f"[{len(adapter._text(m.content))} chars, stop={m.response_metadata.get('finish_reason')}] "
+        + adapter._text(m.content)[-300:].replace("\n", " | ") for m in answers)[:3000]
     row.update(label=_label(r.output), steps=r.steps, tokens_in=r.input_tokens,
                tokens_out=r.output_tokens, seconds=round(r.latency_s, 1), error=r.error or "")
     errs = re.findall(r"ERROR: (\S+)", r.output)

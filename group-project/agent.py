@@ -134,15 +134,14 @@ _LOOKALIKE = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b
 
 
 def normalize_text(text: str) -> str:
-    """For the quote check: same words, ignoring layout. Removes invisible characters,
-    turns curly quotes and long dashes into plain ones, drops hyphens (PDF line breaks turn
-    "end-to-end" into "end-toend"), and squeezes all spaces and line breaks into single
-    spaces. Letters and words must still match exactly."""
+    """For the quote check: the same words in the same order, ignoring formatting.
+    Keeps only letters and digits (lower-cased): spaces, line breaks, punctuation, bullets,
+    markdown (**), hyphens split across lines ("end-toend") and invisible characters are all
+    ignored. A paraphrased or stitched-together quote still fails, because its letters differ."""
     import unicodedata
     t = unicodedata.normalize("NFKC", text or "").translate(_INVISIBLE).translate(_LOOKALIKE)
     t = re.sub(r"\\[nrt]", " ", t)        # a literal "\n" the model copied as text
-    t = re.sub(r"-\s*", "", t)             # hyphens, incl. ones split across lines: end-to-end = end-toend
-    return re.sub(r"\s+", " ", t).strip()
+    return "".join(ch for ch in t.lower() if ch.isalnum())
 
 
 # ---------------------------------------------------------------- nodes

@@ -96,7 +96,7 @@ def main() -> int:
     rank_of = {(jd, cv): i for jd, ids in out["ranking"].items() for i, cv in enumerate(ids, start=1)}
     invited = {(jd, cv) for jd, ids in out["shortlist"].items() for cv in ids}
     cols = (["jd", "jd_file", "cv", "cv_file", "label", "score", "rank", "invited"] + [k for k, _, _ in CRITERIA]
-            + ["why", "error", "verifier_notes", "steps", "tokens_in", "tokens_out", "seconds"])
+            + ["why", "error", "verifier_notes", "answers", "steps", "tokens_in", "tokens_out", "seconds"])
     rows = sorted(out["results"], key=lambda r: (r["jd"], rank_of.get((r["jd"], r["cv"]), 999), r["cv"]))
     with open(results_dir / "scores.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
