@@ -117,6 +117,42 @@ python run_checks.py --plan
 The token saving comes from fewer full-context model calls; check the labels match between
 modes so the saving doesn't come from worse decisions.
 
+## Batch job: score every CV against every JD, invite the top 10%
+
+```bash
+python run_batch.py --limit 2       # cheap test: first 2 CVs x all JDs
+python run_batch.py                 # full run: data/cvs x data/jds (add --plan for planning mode)
+```
+
+Put CVs in `data/cvs/` and JDs in `data/jds/`. **`data/` is gitignored** (private applicant data);
+results go to `data/results/scores.csv` and `data/results/shortlist.csv`.
+
+```
+START → load_files → screen_pair × (CVs × JDs, in parallel via Send) → rank → approve (human) → send_emails → END
+```
+
+1. **load_files** skips CV files over 8 pages (applicant-system exports holding several CVs) and parses
+   every file **once**, so every candidate is judged against the same JD requirement list.
+2. **screen_pair** runs the normal screening graph (same output contract, same verifier) with emails off,
+   then scores the pair 0–100 (`scoring.py`):
+
+   | # | Criterion (priority order) | Weight | Scored by |
+   |---|---|---|---|
+   | 1 | Relevant skills (minimum) + certifications | 6 | share of must-have skills with a verified quote |
+   | 2 | Years of experience (minimum) | 5 | candidate years ÷ minimum (max 1) |
+   | 3 | University ranking | 4 | QS 2027 tier table in code (top 50 / 51–200 / 201–500 / other degree / none) |
+   | 4 | Soft skills | 3 | share of the JD's soft skills with a quote found in the resume (1 model call) |
+   | 5 | Relevant skills (preferred) | 2 | share of nice-to-have skills with a verified quote |
+   | 6 | Years of experience (preferred) | 1 | candidate years ÷ preferred (max 1) |
+
+3. **rank**, per JD: invite the top **10% of that JD's valid applicants, rounded up**, chosen only from
+   `LABEL: 1` candidates (must-haves stay a hard rule; the score only ranks). A CV can be invited to more
+   than one role. Ties are broken by criterion 1, then 2, and so on.
+4. **approve** pauses for a human (`--yes` skips the question). Nothing is sent before approval.
+5. **send_emails** (mocks): `email_invite` to the shortlist, `email_applicant` to everyone else (policy P11).
+
+The single-case contract and `make_agent_fn` for the evaluator are unchanged; the batch is a layer on top.
+
 ## How it works
 
 ```
@@ -131,6 +167,7 @@ START → agent ⇄ tools → verifier ─┬→ email → END        (pass, lab
 | `tools.py` | `parse_resume` / `parse_jd` (wrap `parser.py`), `normalize_skills`, `check_timeline`, email mocks |
 | `adapter.py` | `run_case()` / `make_agent_fn()` → `AgentResult` for the harness |
 | `parser.py`, `paths.py` | Group mate's PDF parser (CV/JD extraction + sensitive-word masking) |
+| `batch.py`, `scoring.py`, `run_batch.py` | Batch job: fan-out graph, the six-criterion score + university table, command-line runner |
 | `planning.py` | Planning mode: planner, `check_plan`, plan executor, answer node |
 | `run_one.py`, `run_checks.py`, `compare_planning.py` | Command-line runners (all take `--plan`; compare runs both) |
 

@@ -4,7 +4,7 @@
   cv_graph / jd_graph). They reshape its output into the formats the verifier
   expects and turn problems into the contract's ERROR codes.
 - normalize_skills / check_timeline: deterministic code (no LLM).
-- email_applicant / email_recruiter: MOCKS. They only log; nothing is sent.
+- email_applicant / email_recruiter / email_invite: MOCKS. They only log; nothing is sent.
 
 parser.py is imported only when a parse tool is first used, because importing it
 needs OPENAI_API_KEY and its `paths` module.
@@ -37,17 +37,58 @@ def _background_loop() -> asyncio.AbstractEventLoop:
         return _LOOP
 
 
+# Batch mode turns this on (enable_parse_cache), so each file is parsed ONCE and every
+# CV x JD pair sees the same parse - same JD requirement list for every candidate, which
+# keeps the ranking fair. Off by default, so eval repeats still measure parser variation.
+PARSE_CACHE: dict | None = None
+
+
+def enable_parse_cache() -> None:
+    global PARSE_CACHE
+    if PARSE_CACHE is None:
+        PARSE_CACHE = {}
+
+
 def _run_graph(graph, file: str):
     """Read a PDF and run one of the parser graphs on it. Returns its 'result'."""
     import parser  # group mate's module (needs OPENAI_API_KEY and paths.py)
 
     path = Path(file)
+    key = (id(graph), str(path.resolve()), path.stat().st_mtime)
+    if PARSE_CACHE is not None and key in PARSE_CACHE:
+        return PARSE_CACHE[key]
     parser.validate_pdf_size(path)  # raises ValueError if too large
     pdf_b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
     args = {"pdf_base64": pdf_b64, "filename": path.name}
     # Works whether or not the caller is already inside an event loop (e.g. Jupyter).
     future = asyncio.run_coroutine_threadsafe(graph.ainvoke(args), _background_loop())
-    return future.result()["result"]
+    result = future.result()["result"]
+    if PARSE_CACHE is not None:  # failures raise above, so they are never cached
+        PARSE_CACHE[key] = result
+    return result
+
+
+def parsed_cv(file: str):
+    """The parser's CVEntry for a single-CV file (uses the cache in batch mode)."""
+    import parser
+    return _run_graph(parser.cv_graph, file).cvs[0]
+
+
+def parsed_jd(file: str):
+    """The parser's JDEntry for a single-JD file (uses the cache in batch mode)."""
+    import parser
+    return _run_graph(parser.jd_graph, file).jds[0]
+
+
+def jd_items(jd) -> list[tuple[str, object]]:
+    """(kind, TaggedItem) in R-number order: skills, then experience, then education.
+    parse_jd and the batch scorer both use this, so R1, R2, ... always mean the same thing."""
+    items = [("skill", s) for s in jd.skills]
+    if jd.experience is not None:
+        items.append(("experience", jd.experience))
+    if jd.education is not None:
+        items.append(("education", jd.education))
+    return items
 
 
 def _check_file(file: str) -> str | None:
@@ -112,11 +153,7 @@ def parse_jd(file: str) -> str:
     jd = jds[0]
 
     # Fixed order: skills, then experience, then education.
-    items = list(jd.skills)
-    if jd.experience is not None:
-        items.append(jd.experience)
-    if jd.education is not None:
-        items.append(jd.education)
+    items = [item for _, item in jd_items(jd)]
     if not items:
         return "ERROR: not_a_jd (no requirements found)"
 
@@ -277,4 +314,11 @@ def email_applicant(candidate_id: int, message: str) -> str:
 def email_recruiter(candidate_id: int, message: str) -> str:
     """MOCK. Log that HR would be notified about the candidate. Nothing is sent."""
     EMAIL_LOG.append({"tool": "email_recruiter", "candidate_id": candidate_id, "message": message})
+    return "logged"
+
+
+@tool
+def email_invite(candidate_id: int, message: str) -> str:
+    """MOCK. Log that an interview invitation would be sent to the applicant. Nothing is sent."""
+    EMAIL_LOG.append({"tool": "email_invite", "candidate_id": candidate_id, "message": message})
     return "logged"

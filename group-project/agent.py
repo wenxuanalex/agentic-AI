@@ -24,7 +24,7 @@ RETRY_LIMIT = 2
 # ---------------------------------------------------------------- model + tools
 from langchain.chat_models import init_chat_model
 from tools import (parse_resume, parse_jd, normalize_skills, check_timeline,
-                   email_applicant, email_recruiter)
+                   email_applicant, email_recruiter, email_invite)
 
 load_dotenv(Path(__file__).parent / ".env")  # OPENAI_API_KEY (and optional OPENAI_API_BASE_URL)
 # Same model as the group's parser.py. Chat Completions (not the Responses API), so replies
@@ -33,7 +33,7 @@ load_dotenv(Path(__file__).parent / ".env")  # OPENAI_API_KEY (and optional OPEN
 model = init_chat_model("openai:gpt-5-mini", use_responses_api=False,
                         base_url=os.getenv("OPENAI_API_BASE_URL"))
 model_with_tools = model.bind_tools([parse_resume, parse_jd, normalize_skills, check_timeline])
-tools_by_name = {"parse_resume": parse_resume, "parse_jd": parse_jd, "normalize_skills": normalize_skills, "check_timeline": check_timeline, "email_applicant": email_applicant, "email_recruiter": email_recruiter}
+tools_by_name = {"parse_resume": parse_resume, "parse_jd": parse_jd, "normalize_skills": normalize_skills, "check_timeline": check_timeline, "email_applicant": email_applicant, "email_recruiter": email_recruiter, "email_invite": email_invite}
 
 
 # ---------------------------------------------------------------- system prompt
@@ -273,9 +273,10 @@ def route(state: State):
 
 
 # ---------------------------------------------------------------- graph
-def build_graph(planning: bool = False):
+def build_graph(planning: bool = False, emails: bool = True):
     """planning=False: the agent picks tools step by step (baseline).
-    planning=True:  planner -> check_plan (code) -> execute_plan (code) -> one answer call."""
+    planning=True:  planner -> check_plan (code) -> execute_plan (code) -> one answer call.
+    emails=False:   stop after the verifier (batch mode: emails are sent after ranking)."""
     b = StateGraph(State)
     if planning:
         from planning import planner, execute_plan, answer
@@ -286,7 +287,8 @@ def build_graph(planning: bool = False):
         b.add_node("agent", agent)
     b.add_node("tools", run_tools)
     b.add_node("verifier", verifier)
-    b.add_node("email", email)
+    if emails:
+        b.add_node("email", email)
     if planning:
         b.add_edge(START, "planner")
         b.add_edge("planner", "execute_plan")
@@ -294,7 +296,8 @@ def build_graph(planning: bool = False):
     else:
         b.add_edge(START, "agent")
     b.add_edge("tools", "agent")
-    b.add_edge("email", END)
+    if emails:
+        b.add_edge("email", END)
     b.add_conditional_edges("agent", route, {"tools": "tools", "verifier": "verifier"})
-    b.add_conditional_edges("verifier", pass_fail, {"email": "email", "agent": "agent", END:END})
+    b.add_conditional_edges("verifier", pass_fail, {"email": "email" if emails else END, "agent": "agent", END: END})
     return b.compile(checkpointer=InMemorySaver())
