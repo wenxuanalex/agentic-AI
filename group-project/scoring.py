@@ -207,7 +207,8 @@ def soft_skills_score(jd, resume_text: str) -> tuple[float, str, dict]:
     items = out["parsed"].items if out.get("parsed") else []
     if not items:
         return 0.0, "no soft skills returned", usage
-    shown = [i.skill for i in items if i.quote and i.quote.strip() and i.quote.strip() in resume_text]
+    resume_norm = A.normalize_text(resume_text)
+    shown = [i.skill for i in items if i.quote and i.quote.strip() and A.normalize_text(i.quote) in resume_norm]
     return len(shown) / len(items), f"{len(shown)}/{len(items)} shown ({', '.join(shown) or 'none'})", usage
 
 

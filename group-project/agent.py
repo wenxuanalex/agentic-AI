@@ -126,6 +126,22 @@ class State(TypedDict, total=False):
     plan_status: str
 
 
+# ---------------------------------------------------------------- helpers
+_INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"), None)
+_LOOKALIKE = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+                            "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-",
+                            "\u2012": "-", "\u2212": "-", "\u00a0": " "})
+
+
+def normalize_text(text: str) -> str:
+    """For the quote check: same words, ignoring layout. Removes invisible characters,
+    turns curly quotes and long dashes into plain ones, and squeezes all spaces and
+    line breaks into single spaces. Letters and words must still match exactly."""
+    import unicodedata
+    t = unicodedata.normalize("NFKC", text or "").translate(_INVISIBLE).translate(_LOOKALIKE)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 # ---------------------------------------------------------------- nodes
 def run_tools(state: State):
     # 0. create an empty list called message for the ToolMessages
@@ -175,8 +191,9 @@ def verifier(state: State):
     # 3. if parse_resume tool was called, check if every evidence quote is actually in the resume text
     if "parse_resume" in tools:
         resume_content = re.findall('EVIDENCE.*"(.*)"', message.content)
+        resume_norm = normalize_text(state["resume"])
         for line in resume_content:
-            if line not in state["resume"]:
+            if normalize_text(line) not in resume_norm:
                 errors.append("Extracted resume content " + line + " not actually found in resume!")
     # 4. check that the last message in messages contains 'LABEL:' with a valid label value
     labels = re.findall("LABEL: (.*)", message.content)
