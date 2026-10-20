@@ -13,14 +13,30 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import concurrent.futures
 import re
+import threading
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 
 # ---------------------------------------------------------------- helpers
+# One event loop for ALL parse calls, running in a background thread. The parser's
+# OpenAI client keeps connections tied to the loop of its first call, so a fresh loop
+# per call (asyncio.run) fails on the second call with "Event loop is closed".
+_LOOP: asyncio.AbstractEventLoop | None = None
+_LOOP_LOCK = threading.Lock()
+
+
+def _background_loop() -> asyncio.AbstractEventLoop:
+    global _LOOP
+    with _LOOP_LOCK:
+        if _LOOP is None or _LOOP.is_closed():
+            _LOOP = asyncio.new_event_loop()
+            threading.Thread(target=_LOOP.run_forever, daemon=True, name="parser-loop").start()
+        return _LOOP
+
+
 def _run_graph(graph, file: str):
     """Read a PDF and run one of the parser graphs on it. Returns its 'result'."""
     import parser  # group mate's module (needs OPENAI_API_KEY and paths.py)
@@ -28,16 +44,10 @@ def _run_graph(graph, file: str):
     path = Path(file)
     parser.validate_pdf_size(path)  # raises ValueError if too large
     pdf_b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
-    coro_args = {"pdf_base64": pdf_b64, "filename": path.name}
-
-    # The parser graphs are async. asyncio.run() fails if an event loop is already
-    # running (e.g. Jupyter), so fall back to a worker thread in that case.
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(graph.ainvoke(coro_args))["result"]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, graph.ainvoke(coro_args)).result()["result"]
+    args = {"pdf_base64": pdf_b64, "filename": path.name}
+    # Works whether or not the caller is already inside an event loop (e.g. Jupyter).
+    future = asyncio.run_coroutine_threadsafe(graph.ainvoke(args), _background_loop())
+    return future.result()["result"]
 
 
 def _check_file(file: str) -> str | None:
