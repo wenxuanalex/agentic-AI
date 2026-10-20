@@ -153,11 +153,12 @@ def _ratio(have: float | None, need: float | None) -> float:
 
 
 # ---------------------------------------------------------------- skills (from the agent's evidence)
-_EVIDENCE = re.compile(r'EVIDENCE: \[R(\d+):[^\]]*\]\s*(.*)')
+_EVIDENCE = re.compile(r'^EVIDENCE: \[R(\d+):.*\](.*)$', re.MULTILINE)
 
 
 def evidence_found(output: str) -> dict[int, bool]:
-    """R-number -> True if the agent quoted the resume for it (quotes are already verified)."""
+    """R-number -> True if the agent quoted the resume for it (quotes are already verified).
+    Looks after the LAST ']' on the line, as a requirement can contain brackets or quotes."""
     return {int(n): rest.strip().startswith('"') for n, rest in _EVIDENCE.findall(output)}
 
 

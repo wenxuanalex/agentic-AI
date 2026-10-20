@@ -135,10 +135,13 @@ _LOOKALIKE = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b
 
 def normalize_text(text: str) -> str:
     """For the quote check: same words, ignoring layout. Removes invisible characters,
-    turns curly quotes and long dashes into plain ones, and squeezes all spaces and
-    line breaks into single spaces. Letters and words must still match exactly."""
+    turns curly quotes and long dashes into plain ones, drops hyphens (PDF line breaks turn
+    "end-to-end" into "end-toend"), and squeezes all spaces and line breaks into single
+    spaces. Letters and words must still match exactly."""
     import unicodedata
     t = unicodedata.normalize("NFKC", text or "").translate(_INVISIBLE).translate(_LOOKALIKE)
+    t = re.sub(r"\\[nrt]", " ", t)        # a literal "\n" the model copied as text
+    t = re.sub(r"-\s*", "", t)             # hyphens, incl. ones split across lines: end-to-end = end-toend
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -190,7 +193,8 @@ def verifier(state: State):
         errors.append("parse_resume and/or parse_jd tool not called!")
     # 3. if parse_resume tool was called, check if every evidence quote is actually in the resume text
     if "parse_resume" in tools:
-        resume_content = re.findall('EVIDENCE.*"(.*)"', message.content)
+        # The quote is what comes AFTER the closing ']' - a requirement can contain quote marks itself.
+        resume_content = re.findall(r'^EVIDENCE: \[R\d+:.*\]\s*"(.*)"\s*$', message.content, re.MULTILINE)
         resume_norm = normalize_text(state["resume"])
         for line in resume_content:
             if normalize_text(line) not in resume_norm:
