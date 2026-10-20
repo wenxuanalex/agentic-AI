@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 *api_key*.txt
 .env
+
+# Private applicant data (CVs, JDs) - never commit
+data/
+group-project/data/
+*.pdf
