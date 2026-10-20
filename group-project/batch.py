@@ -172,7 +172,8 @@ def screen_pair(p: dict):
     if row["label"] in ("0", "1"):
         try:
             resume_text = tools.parse_resume.invoke({"file": cv["file"]})  # cached
-            s = score_pair(tools.parsed_cv(cv["file"]), tools.parsed_jd(jd["file"]), resume_text, r.output)
+            s = score_pair(tools.parsed_cv(cv["file"]), tools.parsed_jd(jd["file"]), resume_text, r.output,
+                           resume_file=cv["file"])
             row["tokens_in"] += s.pop("score_tokens_in", 0)
             row["tokens_out"] += s.pop("score_tokens_out", 0)
             row.update(s)

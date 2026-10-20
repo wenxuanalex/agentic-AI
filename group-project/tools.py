@@ -103,6 +103,27 @@ def _check_file(file: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------- PDF text layer (for the verifier)
+_PDF_TEXT: dict = {}
+
+
+def pdf_text(file: str | None) -> str:
+    """The PDF's own text layer (pypdf), no model involved. The verifier also accepts quotes
+    found here, because the parser's model-written text can mix up two-column CVs.
+    Returns "" if pypdf is not installed or the file can't be read."""
+    if not file:
+        return ""
+    try:
+        path = Path(file)
+        key = (str(path.resolve()), path.stat().st_mtime)
+        if key not in _PDF_TEXT:
+            from pypdf import PdfReader
+            _PDF_TEXT[key] = "\n".join(p.extract_text() or "" for p in PdfReader(str(path)).pages)
+        return _PDF_TEXT[key]
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------- parse tools
 @tool
 def parse_resume(file: str) -> str:

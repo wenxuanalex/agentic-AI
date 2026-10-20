@@ -88,6 +88,8 @@ Use one of these codes:
 
 ## If you receive verification feedback
 A checker may reply with a list of problems in your answer. Fix exactly those problems, using the tool results you already have (call a tool again only if the feedback says it was never called), and write your full answer again in the format above.
+- If a quote was "not found", replace it with a shorter quote copied exactly from one line of the parse_resume output, or write "none found" for that requirement.
+- Nobody will read or answer questions: never ask for the resume, for permission or for a choice. Always end with the full answer in the format above.
 
 ## Example of a correct final answer
 EVIDENCE: [R1: 3+ years Python] "Built data pipelines in Python, 2021-2024"
@@ -194,9 +196,13 @@ def verifier(state: State):
     if "parse_resume" in tools:
         # The quote is what comes AFTER the closing ']' - a requirement can contain quote marks itself.
         resume_content = re.findall(r'^EVIDENCE: \[R\d+:.*\]\s*"(.*)"\s*$', message.content, re.MULTILINE)
-        resume_norm = normalize_text(state["resume"])
+        # A quote counts if it is in the parser's text OR the PDF's own text layer: the parser
+        # (a model) can mix up two-column CVs, so a real quote may be missing from its text.
+        from tools import pdf_text
+        sources = [normalize_text(state["resume"]), normalize_text(pdf_text(state.get("resume_file")))]
         for line in resume_content:
-            if normalize_text(line) not in resume_norm:
+            q = normalize_text(line)
+            if not q or not any(q in s for s in sources if s):
                 errors.append("Extracted resume content " + line + " not actually found in resume!")
     # 4. check that the last message in messages contains 'LABEL:' with a valid label value
     labels = re.findall("LABEL: (.*)", message.content)
