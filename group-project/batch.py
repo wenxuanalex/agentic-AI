@@ -50,6 +50,8 @@ def log(*a):
 class BatchState(TypedDict, total=False):
     data_dir: str
     planning: bool
+    cv_ids: list         # optional: only these CVs (e.g. ["C07", "C12"]); empty = all
+    jd_ids: list         # optional: only these JDs
     cvs: list            # [{"id": "C01", "num": 1, "file": ..., "status": "ok" | "ERROR: ..."}]
     jds: list            # [{"id": "J1", "file": ..., "role": ..., "status": ...}]
     results: Annotated[list, operator.add]   # one row per CV x JD pair (filled in parallel)
@@ -99,6 +101,11 @@ def load_files(state: BatchState):
                   if pages > MAX_CV_PAGES else "ok")
         cvs.append({"id": f"C{i:02d}", "num": i, "file": str(f), "status": status})
     jds = [{"id": f"J{i}", "file": str(f), "status": "ok"} for i, f in enumerate(jd_files, start=1)]
+    # Optional subset (cheap runs). IDs are given BEFORE filtering, so C07 is always the same CV.
+    if state.get("cv_ids"):
+        cvs = [c for c in cvs if c["id"] in state["cv_ids"]]
+    if state.get("jd_ids"):
+        jds = [j for j in jds if j["id"] in state["jd_ids"]]
 
     # Parse every usable file once, in parallel. The cache keeps the result for screen_pair.
     def parse(item, kind):

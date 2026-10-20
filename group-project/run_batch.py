@@ -6,7 +6,10 @@ Usage (from this folder, with OPENAI_API_KEY in .env):
     python run_batch.py --plan              # planning mode for each screening run
     python run_batch.py --yes               # approve the shortlist without asking
     python run_batch.py --workers 4         # pairs screened at the same time (default 8)
-    python run_batch.py --limit 3           # only the first 3 CVs (a cheap test run)
+    python run_batch.py --limit 3           # only the first 3 CVs (C01-C03)
+    python run_batch.py --cvs C07,C12 --jds J1,J4   # only these CVs x these JDs
+    Before spending anything it shows the number of pairs and an estimated cost, and asks to go
+    ahead (--yes skips the question). Planning mode (--plan) uses fewer tokens.
 
 Writes (inside the data folder, which is gitignored - the files hold applicant file names):
     <data>/results/scores.csv      one row per CV x JD: label, score, six criteria, why, tokens
@@ -15,9 +18,7 @@ Writes (inside the data folder, which is gitignored - the files hold applicant f
 from __future__ import annotations
 
 import csv
-import shutil
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -27,6 +28,10 @@ from langgraph.types import Command
 import adapter
 import batch
 from scoring import CRITERIA
+
+# From the full run on 20 Oct (75 pairs, $1.68 -> ~$0.022/pair); planning used ~18% fewer tokens.
+EST_COST_PER_PAIR = 0.023
+EST_COST_PER_PAIR_PLAN = 0.019
 
 
 def _arg(flag: str, default):
@@ -39,28 +44,35 @@ def _arg(flag: str, default):
 def main() -> int:
     planning, auto_yes = "--plan" in sys.argv, "--yes" in sys.argv
     workers, limit = _arg("--workers", 8), _arg("--limit", 0)
-    skip = {"--workers", "--limit"}
+    cv_ids = [x.strip().upper() for x in _arg("--cvs", "").split(",") if x.strip()]
+    jd_ids = [x.strip().upper() for x in _arg("--jds", "").split(",") if x.strip()]
+    skip = {"--workers", "--limit", "--cvs", "--jds"}
     pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and sys.argv[i - 1] not in skip]
     data = Path(pos[0]) if pos else Path(__file__).parent / "data"
     if not (data / "cvs").is_dir() or not (data / "jds").is_dir():
         print(f"Can't find {data}/cvs and {data}/jds")
         return 1
+    if limit and not cv_ids:
+        cv_ids = [f"C{i:02d}" for i in range(1, limit + 1)]
 
+    # ---- budget check before any model call
+    n_cv = len(cv_ids) if cv_ids else len(list((data / "cvs").glob("*.pdf")))
+    n_jd = len(jd_ids) if jd_ids else len(list((data / "jds").glob("*.pdf")))
+    per_pair = EST_COST_PER_PAIR_PLAN if planning else EST_COST_PER_PAIR
+    print(f"{n_cv} CVs x {n_jd} JDs = {n_cv * n_jd} pairs; estimated cost ~${n_cv * n_jd * per_pair:.2f} "
+          f"(+ parsing {n_cv + n_jd} files)")
+    if not auto_yes and input("Go ahead? [y/N] ").strip().lower() != "y":
+        print("Stopped - nothing spent.")
+        return 0
     run_dir = data
-    if limit:  # test run on the first few CVs: link them into a temporary data folder
-        run_dir = Path(tempfile.mkdtemp(prefix="batch_"))
-        (run_dir / "cvs").mkdir(); (run_dir / "jds").mkdir()
-        for f in sorted((data / "cvs").glob("*.pdf"))[:limit]:
-            (run_dir / "cvs" / f.name).symlink_to(f.resolve())
-        for f in sorted((data / "jds").glob("*.pdf")):
-            (run_dir / "jds" / f.name).symlink_to(f.resolve())
 
     print("planning:", "ON" if planning else "off (baseline)", "| workers:", workers)
     graph = batch.build_batch_graph()
     cfg = {"configurable": {"thread_id": f"batch-{uuid.uuid4().hex[:8]}"},
            "max_concurrency": workers, "recursion_limit": 50}
     t0 = time.perf_counter()
-    out = graph.invoke({"data_dir": str(run_dir), "planning": planning, "results": []}, cfg)
+    out = graph.invoke({"data_dir": str(run_dir), "planning": planning, "results": [],
+                        "cv_ids": cv_ids, "jd_ids": jd_ids}, cfg)
 
     # ---- human approval of the shortlist (interrupt)
     while "__interrupt__" in out:
@@ -97,8 +109,6 @@ def main() -> int:
         for r in rows:
             if (r["jd"], r["cv"]) in invited:
                 w.writerow([r["jd"], r["jd_file"], rank_of[(r["jd"], r["cv"])], r["cv"], r["cv_file"], r["score"]])
-    if limit:
-        shutil.rmtree(run_dir, ignore_errors=True)
 
     # ---- summary
     tin = sum(r["tokens_in"] for r in out["results"]); tout = sum(r["tokens_out"] for r in out["results"])

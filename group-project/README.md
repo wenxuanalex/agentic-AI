@@ -120,9 +120,12 @@ modes so the saving doesn't come from worse decisions.
 ## Batch job: score every CV against every JD, invite the top 10%
 
 ```bash
-python run_batch.py --limit 2       # cheap test: first 2 CVs x all JDs
-python run_batch.py                 # full run: data/cvs x data/jds (add --plan for planning mode)
+python run_batch.py --limit 2                   # first 2 CVs x all JDs
+python run_batch.py --cvs C07,C12 --jds J1,J4   # only these CVs x these JDs (IDs = sorted file order)
+python run_batch.py                             # full run: data/cvs x data/jds (add --plan for planning mode)
 ```
+
+It prints the number of pairs and an estimated cost (~$0.02 per pair) and asks before spending anything.
 
 Put CVs in `data/cvs/` and JDs in `data/jds/`. **`data/` is gitignored** (private applicant data);
 results go to `data/results/scores.csv` and `data/results/shortlist.csv`.
