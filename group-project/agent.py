@@ -1,14 +1,17 @@
 """Resume Screening Agent — LangGraph nodes (group project, LangGraph portion).
 
-Status: State, run_tools and verifier are written and tested.
-To do: edge function after the verifier, email node, agent node + system prompt,
-graph wiring, adapter to AgentResult, the six tools.
+Status: State, run_tools, verifier, edge after verifier (pass_fail) and email node
+are written and tested.
+To do: agent node + system prompt, graph wiring, adapter to AgentResult
+(output must come from the agent's last reply, not the email ToolMessage), the six tools.
 """
 import re
 from typing import Annotated, TypedDict
 
 from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.graph import END
 from langgraph.graph.message import add_messages
+from langgraph.types import interrupt
 
 # ---------------------------------------------------------------- constants
 POLICY_CLAUSES = ("P1", "P2", "P3", "P4", "P5", "P6")
@@ -24,6 +27,7 @@ class State(TypedDict, total=False):
     retry: int
     pass_fail: bool
     label: str
+    candidate_id: int
 
 
 # ---------------------------------------------------------------- nodes
@@ -120,3 +124,41 @@ def verifier(state: State):
         note = "\n".join(errors)
         updates["messages"] = [HumanMessage(content=note)]
     return updates
+
+
+# ---------------------------------------------------------------- edges
+def pass_fail(state: State):
+    # 1. read the pass/fail field from state
+    passed = state["pass_fail"]
+    # 2. if pass/fail is pass, read the label, and send to the email node if label value is 0 or 1. send to the end node if label value is invalid.
+    if passed == True:
+        label_value = state["label"]
+        if label_value == "0" or label_value == "1":
+            return "email"
+        elif label_value == 'invalid':
+            return END
+    # 3. if state's pass/fail is fail, and the number of retries is at most the retry cap, send to the agent node. otherwise, send to the END node
+    if passed == False:
+        retry = state["retry"]
+        if retry <= RETRY_LIMIT:
+            return "agent"
+        else:
+            return END
+
+
+# ---------------------------------------------------------------- email node
+def email(state: State):
+    label = state["label"]
+    if label == "0":
+        tool = tools_by_name["email_applicant"]
+        result = tool.invoke({"candidate_id": state["candidate_id"], "message": "Thank you for applying. We won't be taking your application further."})
+        email_msg = ToolMessage(content=str(result), name="email_applicant", tool_call_id="email-1")
+        return {"messages": [email_msg]}
+    elif label == '1':
+        decision = interrupt({"candidate_id": state["candidate_id"], "reason": state["messages"][-1].content})
+        if decision == "approve":
+            tool = tools_by_name["email_recruiter"]
+            result = tool.invoke({"candidate_id": state["candidate_id"], "message": "A candidate has passed automated screening and is recommended for your review."})
+            email_msg = ToolMessage(content=str(result), name="email_recruiter", tool_call_id="email-2")
+            return {"messages": [email_msg]}
+    return None
