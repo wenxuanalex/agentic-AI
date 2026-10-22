@@ -1,0 +1,4 @@
+﻿run,exit_code,scores_csv_exists,shortlist_csv_exists,log
+1,0,True,True,attack_runs\session_20261023_000051\run_01\run.log
+2,0,True,True,attack_runs\session_20261023_000051\run_02\run.log
+3,0,True,True,attack_runs\session_20261023_000051\run_03\run.log

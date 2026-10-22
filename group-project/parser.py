@@ -88,7 +88,19 @@ async def extract_cvs(state: CVAgentState) -> dict:
     text_block = {
         "type": "text",
         "text": (
-            "This PDF may contain one or more CVs/resumes. Identify every distinct CV and extract the requested fields including the full text of each CV."
+            "This PDF may contain one or more CVs/resumes. "
+            "Identify every distinct CV and extract the requested fields, "
+            "including the full text of each CV.\n\n"
+            "DOCUMENT-TYPE VALIDATION:\n"
+            "- Only extract documents that are actually candidate CVs/resumes.\n"
+            "- A job description, job advertisement, role specification, or "
+            "list of hiring requirements is not a CV.\n"
+            "- Do not convert a job description into a CV just because it "
+            "mentions skills, qualifications, education, or experience.\n"
+            "- If the PDF contains no CVs, return an empty 'cvs' list.\n"
+            "- If the PDF contains multiple distinct CVs, return each CV "
+            "separately.\n"
+            "- Do not invent candidate information that is absent from the PDF."
         )
     }
     message = {
@@ -107,11 +119,45 @@ async def extract_jds(state: JDAgentState) -> dict:
         "type": "input_file",
         "filename": state["filename"],
         "file_data": f"data:application/pdf;base64,{state['pdf_base64']}",
-    }
+    }    
     text_block = {
         "type": "text",
-        "text": (
-            "This PDF may contain one or more job descriptions (JDs). Identify every distinct JD and extract the requested fields. For each skill, experience requirement, and education requirement, tag it as 'mandatory' if the JD presents it as required, or 'optional' if presented as preferred, nice-to-have, a plus, or optional. If the JD does not clearly indicate, default to 'mandatory'."
+        "text": ( """
+            This PDF may contain one or more job descriptions (JDs).
+            Identify every distinct JD and extract the requested fields.
+
+            For each skill, experience requirement, and education requirement,
+            tag it as 'mandatory' if the JD presents it as required, or
+            'optional' if presented as preferred, nice-to-have, a plus, or optional.
+            If the requirement's status is unclear, default to 'mandatory'.
+
+            EXPERIENCE EXTRACTION RULES:
+            1. Only populate the experience field when the JD explicitly states
+            an experience requirement.
+            2. Do not classify a statement as an experience requirement merely
+            because it contains phrases such as 'experience building',
+            'experience with', 'familiarity with', 'proficiency in', or
+            'ability to'. These statements usually describe skills or
+            capabilities and should be extracted under skills instead.
+            3. Statements describing technical activities, responsibilities,
+            or capabilities must not be converted into years-of-experience
+            requirements.
+            4. Never infer a minimum number of years from the job title,
+            seniority, responsibilities, qualifications, or other context.
+            5. Do not invent or expand requirements beyond what the JD states.
+            6. If the JD does not explicitly state an experience requirement,
+            return experience as null.
+            7. If a qualitative experience requirement is explicitly stated,
+            preserve its original meaning without inventing a number of years.
+            8. Before returning the result, verify that every non-null
+            experience value is supported by the source text.
+
+            For example, 'Experience building and evaluating ML/AI models'
+            describes a skill or capability and should normally be extracted
+            under skills, not experience.
+
+            Return the extracted information using the specified output schema.
+            """
         )
     }
     message = {

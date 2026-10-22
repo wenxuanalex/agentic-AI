@@ -87,7 +87,7 @@ def test_batch_end_to_end(tmp_path, monkeypatch, capsys):
     assert run_batch.main() == 0
     out = capsys.readouterr().out
 
-    rows = {r["cv"]: r for r in csv.DictReader(open(data / "results" / "scores.csv"))}
+    rows = {r["cv"]: r for r in csv.DictReader(open(data / "results" / "scores.csv", encoding="utf-8-sig"))}
     clean, white = rows["C01"], rows["C02"]
     # Both screened validly; the white-text CV is flagged, the clean one is not
     assert clean["agent_label"] in ("0", "1") and white["agent_label"] in ("0", "1")

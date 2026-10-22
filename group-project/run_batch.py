@@ -46,6 +46,33 @@ def _arg(flag: str, default):
 
 
 def main() -> int:
+    # Configure encoding only when the stream supports reconfigure().
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+    planning, auto_yes = "--plan" in sys.argv, "--yes" in sys.argv
+    workers, limit = _arg("--workers", 8), _arg("--limit", 0)
+
+    try:
+        invite_share = batch.check_share(_arg("--top", batch.INVITE_SHARE))
+    except ValueError as e:
+        print(e)
+        return 1
+
+    cv_ids = [
+        x.strip().upper()
+        for x in _arg("--cvs", "").split(",")
+        if x.strip()
+    ]
+    jd_ids = [
+        x.strip().upper()
+        for x in _arg("--jds", "").split(",")
+        if x.strip()
+    ]
     planning, auto_yes = "--plan" in sys.argv, "--yes" in sys.argv
     workers, limit = _arg("--workers", 8), _arg("--limit", 0)
     try:
@@ -121,16 +148,16 @@ def main() -> int:
     results_dir.mkdir(exist_ok=True)
     rank_of = {(jd, cv): i for jd, ids in out["ranking"].items() for i, cv in enumerate(ids, start=1)}
     invited = {(jd, cv) for jd, ids in out["shortlist"].items() for cv in ids}
-    cols = (["jd", "jd_file", "cv", "cv_file", "final_label", "score", "rank", "agent_label"] + [k for k, _, _ in CRITERIA]
+    cols = (["jd", "jd_file", "cv", "cv_file", "final_label", "score", "rank", "agent_label","tool_calls","evidence_lines","n_requirements"] + [k for k, _, _ in CRITERIA]
             + ["why", "hidden_text_chars", "hidden_text_sample", "error", "verifier_notes", "answers", "steps", "tokens_in", "tokens_out", "seconds"])
     rows = sorted(out["results"], key=lambda r: (r["jd"], rank_of.get((r["jd"], r["cv"]), 999), r["cv"]))
-    with open(results_dir / "scores.csv", "w", newline="") as f:
+    with open(results_dir / "scores.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for r in rows:
             final = "invalid" if r["label"] not in ("0", "1") else ("1" if (r["jd"], r["cv"]) in invited else "0")
             w.writerow({**r, "rank": rank_of.get((r["jd"], r["cv"]), ""), "final_label": final, "agent_label": r["label"]})
-    with open(results_dir / "shortlist.csv", "w", newline="") as f:
+    with open(results_dir / "shortlist.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["jd", "jd_file", "rank", "cv", "cv_file", "score"])
         for r in rows:

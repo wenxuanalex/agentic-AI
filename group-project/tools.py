@@ -227,7 +227,14 @@ def visible_pdf_text(file: str | None) -> tuple[str, dict]:
                                 for r in why:
                                     reasons[r] = reasons.get(r, 0) + 1
                         return not why
-                    pages.append(page.filter(keep).extract_text() or "")
+                    filtered_page = page.filter(keep)
+                    page_text = filtered_page.extract_text() or ""
+
+                    print("VISIBLE DEBUG: page chars =", len(page.chars))
+                    print("VISIBLE DEBUG: extracted chars =", len(page_text))
+                    print("VISIBLE DEBUG: preview =", repr(page_text[:500]))
+
+                    pages.append(page_text)
                     n_hidden += sum(bool(c.get("text", "").strip()) for c in hidden)
                     if hidden:
                         samples.append(extract_text(hidden))
@@ -236,8 +243,9 @@ def visible_pdf_text(file: str | None) -> tuple[str, dict]:
                              {"hidden_chars": n_hidden, "hidden_sample": sample, "reasons": reasons})
         text, report = _VISIBLE[key]
         return text, dict(report)
-    except Exception:
-        return "", empty
+    except Exception as e:
+        print("VISIBLE PDF ERROR:", type(e).__name__, str(e))
+        raise
 
 
 def has_text_layer(file: str | None) -> bool:
@@ -272,7 +280,38 @@ def quote_sources(file: str | None, parser_text: str | None) -> list[str]:
     return [parser_text or "", pdf_text(file)]
 
 
+
+
 # ---------------------------------------------------------------- parse tools
+
+def _looks_like_jd_not_resume(text: str) -> bool:
+    t = text.lower()
+
+    jd_signals = [
+        "job description",
+        "key responsibilities",
+        "job responsibilities",
+        "what you'll do",
+        "what you will do",
+        "requirements for the role",
+        "qualifications required",
+        "about the role",
+    ]
+
+    resume_signals = [
+        "work experience",
+        "professional experience",
+        "employment history",
+        "education",
+        "resume",
+        "curriculum vitae",
+    ]
+
+    jd_hits = sum(signal in t for signal in jd_signals)
+    resume_hits = sum(signal in t for signal in resume_signals)
+
+    return jd_hits >= 2 and resume_hits == 0
+
 @tool
 def parse_resume(file: str) -> str:
     """Read a resume PDF and return its full text, with sensitive personal details
@@ -281,6 +320,11 @@ def parse_resume(file: str) -> str:
     import parser
 
     problem = _check_file(file)
+
+    visible_text, _ = visible_pdf_text(file)
+
+    if visible_text.strip() and _looks_like_jd_not_resume(visible_text):
+        return "ERROR: not_a_resume (document appears to be a job description)"
     if problem:
         return problem
     try:
@@ -435,41 +479,178 @@ def _fmt(month_index: int) -> str:
     return f"{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][month_index % 12]} {month_index // 12}"
 
 
+import re
+from datetime import datetime
+
+
+
+# ---------------------------------------------------------------- check_timeline
+_MONTHS = {
+    name.lower(): i
+    for i, name in enumerate(
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        start=1,
+    )
+}
+
+_MONTH_NAMES = (
+    r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+    r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
+    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
+)
+
+_DATE = (
+    rf"(?:"
+    rf"(?:{_MONTH_NAMES})\.?\s*['’]?\s*\d{{2,4}}"
+    rf"|(?:0?[1-9]|1[0-2])\s*/\s*(?:19|20)\d{{2}}"
+    rf"|(?:19|20)\d{{2}}\s*/\s*(?:0?[1-9]|1[0-2])"
+    rf"|(?:19|20)\d{{2}}"
+    rf")"
+)
+
+_END = rf"(?:{_DATE}|present|current|now|to date|till date|ongoing)"
+
+_RANGE = re.compile(
+    rf"({_DATE})\s*(?:-|–|—|−|\bto\b|\btill\b|\buntil\b)\s*({_END})",
+    re.IGNORECASE,
+)
+
+
+def _to_month(value: str, is_end: bool = False) -> int | None:
+    """Convert a supported date into an integer month index."""
+    value = value.strip().lower().replace("’", "'").replace(".", "")
+    
+    if value in {
+        "present", "current", "now", "to date", "till date", "ongoing"
+    }:
+        today = datetime.now()
+        return today.year * 12 + today.month - 1
+
+    match = re.fullmatch(
+        rf"({_MONTH_NAMES})\s*'?\s*(\d{{2,4}})",
+        value,
+        re.IGNORECASE,
+    )
+    if match:
+        month = _MONTHS[match.group(1)[:3].lower()]
+        year = int(match.group(2))
+        if year < 100:
+            year += 2000 if year < 50 else 1900
+        return year * 12 + month - 1
+
+    match = re.fullmatch(
+        r"(0?[1-9]|1[0-2])\s*/\s*((?:19|20)\d{2})",
+        value,
+    )
+    if match:
+        return int(match.group(2)) * 12 + int(match.group(1)) - 1
+
+    match = re.fullmatch(
+        r"((?:19|20)\d{2})\s*/\s*(0?[1-9]|1[0-2])",
+        value,
+    )
+    if match:
+        return int(match.group(1)) * 12 + int(match.group(2)) - 1
+
+    match = re.fullmatch(r"(19|20)\d{2}", value)
+    if match:
+        year = int(value)
+        # A year-only start covers January; an end covers December.
+        return year * 12 + (11 if is_end else 0)
+
+    return None
+
+
+def extract_work_experience_section(text: str) -> str:
+    """
+    Extract the work experience section to avoid counting education,
+    projects, certifications, or other unrelated date ranges.
+    """
+    start_pattern = re.compile(
+        r"\b(?:work experience|professional experience|employment history|"
+        r"work history|career history)\b",
+        re.IGNORECASE,
+    )
+
+    end_pattern = re.compile(
+        r"\b(?:education|academic background|technical skills|skills|"
+        r"projects|certifications|certificates|awards|interests)\b",
+        re.IGNORECASE,
+    )
+
+    start = start_pattern.search(text)
+    if not start:
+        return text
+
+    remainder = text[start.end():]
+    end = end_pattern.search(remainder)
+
+    if end:
+        return remainder[:end.start()]
+
+    return remainder
+
+
 @tool
 def check_timeline(jobs: str) -> str:
-    """Work out total years of experience, gaps and overlaps from job date ranges in the
-    resume's work history (e.g. 'Jan 2019 - Mar 2021', '2019-2021', '03/2021 - present').
-    Overlapping jobs are counted once. Input: the work-history text. Use the result for
-    'years of experience' requirements."""
-    import datetime
-    d = datetime.date.today()
-    today = (d.year, d.month)
+    """
+    Calculate total professional experience from employment date ranges.
+    Merge overlapping periods so concurrent jobs are not double-counted.
+    Supports month-year, numeric month-year, and year-only dates.
+    """
+    print(">>> CHECK_TIMELINE CALLED <<<")
+    print(">>> INPUT TYPE:", type(jobs).__name__)
+    print(">>> INPUT:", repr(jobs)[:3000])
+    print("check_timeline input:", repr(jobs))
+    print("check_timeline input type:", type(jobs))
+
+    if not isinstance(jobs, str) or not jobs.strip():
+        return "No date ranges found in the text."
+
+    text = (
+        jobs.replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+        .replace("\u00a0", " ")
+        .replace("\u200b", "")
+    )
+
+    text = extract_work_experience_section(text)
+
+    matches = list(_RANGE.finditer(text))
+    print(">>> MATCHES:", [m.groups() for m in matches])
 
     spans = []
-    for start_txt, end_txt in _RANGE.findall(jobs):
-        s = _to_month(start_txt, today, is_end=False)
-        e = _to_month(end_txt, today, is_end=True)
-        if s is not None and e is not None and e >= s:
-            spans.append((s, e + 1))  # end month inclusive -> half-open
+    for match in matches:
+        start = _to_month(match.group(1), is_end=False)
+        end = _to_month(match.group(2), is_end=True)
+
+        if start is None or end is None or end < start:
+            continue
+
+        spans.append((start, end))
+
     if not spans:
         return "No date ranges found in the text."
 
     spans.sort()
-    merged, overlaps, gaps = [list(spans[0])], [], []
-    for s, e in spans[1:]:
-        last = merged[-1]
-        if s < last[1]:  # overlaps the previous block
-            overlaps.append(f"{_fmt(s)} to {_fmt(min(e, last[1]) - 1)}")
-            last[1] = max(last[1], e)
+    merged = []
+
+    for start, end in spans:
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
         else:
-            if s - last[1] > GAP_MONTHS:
-                gaps.append(f"{_fmt(last[1])} to {_fmt(s - 1)} ({s - last[1]} months)")
-            merged.append([s, e])
-    total_months = sum(e - s for s, e in merged)
-    return (f"Total experience: {total_months // 12} years {total_months % 12} months "
-            f"(overlapping jobs counted once; {len(spans)} date range(s) found). "
-            f"Gaps over {GAP_MONTHS} months: {'; '.join(gaps) or 'none'}. "
-            f"Overlaps: {'; '.join(overlaps) or 'none'}.")
+            merged[-1][1] = max(merged[-1][1], end)
+
+    total_months = sum(end - start + 1 for start, end in merged)
+    years = total_months // 12
+    months = total_months % 12
+
+    return f"Total experience: {years} years {months} months"
 
 
 # ---------------------------------------------------------------- email mocks

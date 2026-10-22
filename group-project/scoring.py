@@ -7,11 +7,12 @@ criterion always counts more. Each criterion scores 0-1; the total is 0-100.
   1  relevant skills (minimum) + certs        6     share of MUST-HAVE skill requirements with a
                                                     verified EVIDENCE quote (from the agent's answer)
   2  years of experience (minimum)            5     candidate years / minimum years (capped at 1)
-  3  university ranking                       4     tier from UNIVERSITY_TIERS (QS 2027) - code, no model
-  4  soft skills                              3     share of the JD's soft skills with a quote that
+  3  relevant experience beyond minimum       4     additional years beyond the minimum, capped at 5
+  4  university ranking                       4     tier from UNIVERSITY_TIERS (QS 2027) - code, no model
+  5  soft skills                              3     share of the JD's soft skills with a quote that
                                                     really appears in the resume (one small model call)
-  5  relevant skills (preferred)              2     share of NICE-TO-HAVE skill requirements with evidence
-  6  years of experience (preferred)          1     candidate years / preferred years (capped at 1)
+  6  relevant skills (preferred)              2     share of NICE-TO-HAVE skill requirements with evidence
+  7  years of experience (preferred)          1     candidate years / preferred years (capped at 1)
 
 Guardrail 2 (prompt injection): the parser reads the raw PDF, hidden text included, so its years
 and education are only used when the VISIBLE text backs them: years = min(parser, check_timeline
@@ -30,14 +31,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 CRITERIA = [  # (key, label, weight)
-    ("skills_min", "relevant skills (minimum) + certifications", 6),
-    ("years_min", "years of experience (minimum)", 5),
+    ("skills_min", "relevant skills (minimum) + certifications", 7),
+    ("years_min", "years of experience (minimum)", 6),
+    ("years_above_min", "relevant experience beyond minimum", 5),
     ("university", "university ranking", 4),
     ("soft_skills", "soft skills", 3),
     ("skills_pref", "relevant skills (preferred)", 2),
     ("years_pref", "years of experience (preferred)", 1),
 ]
-TOTAL_WEIGHT = sum(w for _, _, w in CRITERIA)  # 21
+TOTAL_WEIGHT = sum(w for _, _, w in CRITERIA)
 
 # ---------------------------------------------------------------- university tiers
 # QS World University Rankings 2027 (released June 2026). Tier scores:
@@ -267,8 +269,24 @@ def score_pair(cv, jd, resume_text: str, agent_output: str, resume_file: str | N
     uni, uni_why = university_score(cv.education if cv is not None else [], visible)
     soft, soft_why, usage = soft_skills_score(jd, resume_text, resume_file)
 
-    parts = {"skills_min": skills_min, "years_min": _ratio(years, need_min), "university": uni,
-             "soft_skills": soft, "skills_pref": skills_pref, "years_pref": _ratio(years, need_pref)}
+    years_min_score = _ratio(years, need_min)
+
+    # Reward additional experience after the minimum is met.
+    # Cap the score at 1.0 after 5 additional years.
+    if years is not None and need_min is not None and need_min > 0:
+        years_above_min = max(0.0, min(1.0, (years - need_min) / 5.0))
+    else:
+        years_above_min = 0.0
+
+    parts = {
+        "skills_min": skills_min,
+        "years_min": years_min_score,
+        "years_above_min": years_above_min,
+        "university": uni,
+        "soft_skills": soft,
+        "skills_pref": skills_pref,
+        "years_pref": _ratio(years, need_pref),
+    }
     total = 100 * sum(parts[k] * w for k, _, w in CRITERIA) / TOTAL_WEIGHT
     years_txt = f"{years:.1f}" if years is not None else "?"
     why = (f"skills: {skills_why}; years: {years_txt} ({years_src}{', ' + years_guard if years_guard else ''}) "
@@ -279,5 +297,5 @@ def score_pair(cv, jd, resume_text: str, agent_output: str, resume_file: str | N
 
 
 def rank_key(row: dict) -> tuple:
-    """Sort key: total score, then each criterion in priority order (breaks ties)."""
-    return (row["score"],) + tuple(row[k] for k, _, _ in CRITERIA)
+    """Rank by criterion priority first, then use total score as the final tiebreaker."""
+    return tuple(row[k] for k, _, _ in CRITERIA) + (row["score"],)
