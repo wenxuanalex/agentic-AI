@@ -130,7 +130,7 @@ def load_files(state: BatchState):
     for item, kind in jobs:
         if item["status"] == "ok":
             tool = tools.parse_resume if kind == "cv" else tools.parse_jd
-            (out_dir / f"{item['id']}.txt").write_text(tool.invoke({"file": item["file"]}))  # cached
+            (out_dir / f"{item['id']}.txt").write_text(tool.invoke({"file": item["file"]}),encoding="utf-8",)  # cached
     log(f"{sum(c['status'] == 'ok' for c in cvs)}/{len(cvs)} CVs and "
         f"{sum(j['status'] == 'ok' for j in jds)}/{len(jds)} JDs usable")
     return {"cvs": cvs, "jds": jds}
@@ -174,6 +174,12 @@ def screen_pair(p: dict):
         + adapter._text(m.content)[-300:].replace("\n", " | ") for m in answers)[:3000]
     row.update(label=_label(r.output), steps=r.steps, tokens_in=r.input_tokens,
                tokens_out=r.output_tokens, seconds=round(r.latency_s, 1), error=r.error or "")
+    row["tool_calls"] = ",".join(r.tool_calls)
+    row["evidence_lines"] = len(re.findall(r"^EVIDENCE:", r.output, re.MULTILINE))
+    try:
+        row["n_requirements"] = len(tools.jd_items(tools.parsed_jd(jd["file"])))
+    except Exception:
+        row["n_requirements"] = ""
     errs = re.findall(r"ERROR: (\S+)", r.output)
     if errs:
         row["error"] = errs[-1]
@@ -185,8 +191,11 @@ def screen_pair(p: dict):
             row["tokens_in"] += s.pop("score_tokens_in", 0)
             row["tokens_out"] += s.pop("score_tokens_out", 0)
             row.update(s)
-        except Exception as e:  # scoring failed: keep the label, no score
+        except Exception as e:
+            import traceback
+
             row["error"] = f"scoring failed: {type(e).__name__}: {e}"
+            traceback.print_exc()
     log(f"{cv['id']} x {jd['id']}: label {row['label']}, score {row['score']}")
     return {"results": [row]}
 
@@ -199,19 +208,50 @@ def check_share(share) -> float:
     return share
 
 
-def rank_results(results: list, jds: list, invite_share: float = INVITE_SHARE) -> tuple[dict, dict]:
-    """Pure function (no model calls): per JD, rank every scored valid candidate and take the
-    top invite_share, rounded up. Returns (shortlist, ranking). A UI can call this directly on
-    saved results to preview a different share instantly."""
+
+
+def rank_results(
+    results: list,
+    jds: list,
+    invite_share: float = INVITE_SHARE,
+) -> tuple[dict, dict]:
+    """
+    Stage 1: Reject candidates who fail mandatory screening.
+    Stage 2: Rank eligible candidates by score.
+    Stage 3: Invite the top invite_share of eligible candidates,
+    rounded up.
+    """
     share = check_share(invite_share)
-    shortlist, ranking = {}, {}
+    shortlist = {}
+    ranking = {}
+
     for jd in jds:
-        valid = [r for r in results if r["jd"] == jd["id"] and r["label"] in ("0", "1")]
-        k = math.ceil(share * len(valid)) if valid else 0
-        eligible = sorted([r for r in valid if r["score"] is not None], key=rank_key, reverse=True)
-        ranking[jd["id"]] = [r["cv"] for r in eligible]   # every scored candidate, best first
-        shortlist[jd["id"]] = ranking[jd["id"]][:k]
+        jd_id = jd["id"]
+
+        # Stage 1: Only candidates who pass mandatory screening
+        # and have a valid score are eligible.
+        eligible = [
+            r for r in results
+            if r["jd"] == jd_id
+            and r["label"] == "1"
+            and r["score"] is not None
+            and r.get("hidden_text_chars", 0) == 0
+        ]
+
+        # Stage 2: Rank eligible candidates by score and tie-break rules.
+        eligible.sort(key=rank_key, reverse=True)
+
+        # Store the complete ranking of eligible candidates.
+        ranking[jd_id] = [r["cv"] for r in eligible]
+
+        # Stage 3: Calculate the invitation quota from eligible candidates.
+        k = math.ceil(share * len(eligible))
+        shortlist[jd_id] = [
+            r["cv"] for r in eligible[:k]
+        ]
+
     return shortlist, ranking
+
 
 
 def rank(state: BatchState):
@@ -229,22 +269,55 @@ def approve(state: BatchState):
     return Command(goto="send_emails", update={"approved": decision == "approve"})
 
 
+
 def send_emails(state: BatchState):
     if not state.get("approved"):
         return {"emails": []}
+
     sent = []
-    roles = {j["id"]: j.get("role") or Path(j["file"]).stem for j in state["jds"]}
+    roles = {
+        j["id"]: j.get("role") or Path(j["file"]).stem
+        for j in state["jds"]
+    }
+
     for jd_id, invited in state["shortlist"].items():
-        for r in (x for x in state["results"] if x["jd"] == jd_id and x["label"] in ("0", "1")):
+        for r in (
+            x for x in state["results"]
+            if x["jd"] == jd_id and x["label"] in ("0", "1")
+        ):
+            # Rule 1: Disqualify CVs containing detected hidden text.
+            if r.get("hidden_text_chars", 0) > 0:
+                log(
+                    f"{r['cv']} x {jd_id}: disqualified due to "
+                    f"{r['hidden_text_chars']} hidden-text characters; "
+                    "no email sent."
+                )
+                continue
+
+            # Rule 2: Invite shortlisted candidates.
             if r["cv"] in invited:
-                tools.email_invite.invoke({"candidate_id": r["cv_num"],
-                                           "message": f"We'd like to invite you to interview for {roles[jd_id]}."})
+                tools.email_invite.invoke({
+                    "candidate_id": r["cv_num"],
+                    "message": (
+                        f"We'd like to invite you to interview "
+                        f"for {roles[jd_id]}."
+                    ),
+                })
                 sent.append((r["cv"], jd_id, "email_invite"))
+
+            # Rule 3: Reject eligible candidates who were not shortlisted.
             else:
-                tools.email_applicant.invoke({"candidate_id": r["cv_num"],
-                                              "message": f"Thank you for applying for {roles[jd_id]}. We won't be taking your application further."})
+                tools.email_applicant.invoke({
+                    "candidate_id": r["cv_num"],
+                    "message": (
+                        f"Thank you for applying for {roles[jd_id]}. "
+                        "We won't be taking your application further."
+                    ),
+                })
                 sent.append((r["cv"], jd_id, "email_applicant"))
+
     return {"emails": sent}
+
 
 
 # ---------------------------------------------------------------- graph
