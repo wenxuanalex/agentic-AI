@@ -29,15 +29,12 @@ SCORES_PATHS = [
     Path("sample_scores.csv"),
 ]
 
-# scoring.py CRITERIA: (csv column, label, weight)
-CRITERIA = [
-    ("skills_min",  "Relevant skills (minimum) + certifications", 6),
-    ("years_min",   "Years of experience (minimum)",              5),
-    ("university",  "University ranking",                         4),
-    ("soft_skills", "Soft skills",                                3),
-    ("skills_pref", "Relevant skills (preferred)",                2),
-    ("years_pref",  "Years of experience (preferred)",            1),
-]
+# Single source of truth: the criteria and the ranking rule come from the batch code itself,
+# so this screen always matches who actually gets emailed. Neither import needs an API key.
+import batch
+import scoring
+
+CRITERIA = [(k, label[:1].upper() + label[1:], w) for k, label, w in scoring.CRITERIA]
 
 POLICY_TEXT = {
     "P1": "Merit — skills, experience and ability to do the job only",
@@ -147,28 +144,24 @@ def to_float(v):
         return None
 
 
-def rank_key(row):
-    """Mirrors scoring.rank_key: each criterion in priority order first, total
-    score last. A lower total can outrank a higher one."""
-    return tuple(to_float(row.get(k)) or 0.0 for k, _, _ in CRITERIA) + (
-        to_float(row.get("score")) or 0.0,
-    )
-
-
 def rank_results(rows, invite_share):
-    """Mirrors batch.rank_results: per JD, take the top share of valid scored
-    candidates, rounded up. No model calls - re-ranking is free."""
-    invited, ranking = set(), {}
-    for jd in sorted({r["jd"] for r in rows}):
-        valid = [r for r in rows if r["jd"] == jd and r["agent_label"] in ("0", "1")]
-        scored = sorted(
-            [r for r in valid if to_float(r["score"]) is not None],
-            key=rank_key,
-            reverse=True,
-        )
-        k = math.ceil(invite_share * len(valid)) if valid else 0
-        ranking[jd] = scored
-        invited.update((jd, r["cv"]) for r in scored[:k])
+    """Uses batch.rank_results (the rule the emails follow): rank only eligible candidates -
+    agent label 1, a score, no error, no hidden text - and invite the top share of THEM,
+    rounded up. No model calls - re-ranking is free.
+    Returns (invited {(jd, cv)}, ranking {jd: [rows best first]}) for the screens below."""
+    def as_batch_row(r):
+        row = {**r, "label": r.get("agent_label"), "score": to_float(r.get("score")),
+               "error": r.get("error") or ""}
+        for k, _, _ in CRITERIA:
+            row[k] = to_float(r.get(k)) or 0.0
+        return row
+
+    jd_ids = sorted({r["jd"] for r in rows})
+    shortlist, ranked_ids = batch.rank_results([as_batch_row(r) for r in rows],
+                                               [{"id": j} for j in jd_ids], invite_share)
+    by_key = {(r["jd"], r["cv"]): r for r in rows}
+    ranking = {j: [by_key[(j, cv)] for cv in ranked_ids[j]] for j in jd_ids}
+    invited = {(j, cv) for j in jd_ids for cv in shortlist[j]}
     return invited, ranking
 
 
@@ -246,7 +239,7 @@ else:
 # --- Invite share: the recruiter's control over how many get invited ---------
 st.subheader("Invite share")
 share = st.slider(
-    "Top share of valid applicants invited, per role",
+    "Top share of eligible applicants (agent label 1) invited, per role",
     min_value=0.05, max_value=1.0, value=0.20, step=0.05,
     format="%.2f",
 )
@@ -266,11 +259,12 @@ jd_invited = [r for r in ranking[jd] if (jd, r["cv"]) in invited]
 st.divider()
 
 # --- Counts -----------------------------------------------------------------
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Screened", len(jd_rows))
 m2.metric("Valid", len(valid_rows))
-m3.metric("Invited", len(jd_invited))
-m4.metric("Reviewed", sum(1 for r in jd_rows if r["cv"] in st.session_state.decisions))
+m3.metric("Eligible (label 1)", len(ranking[jd]))
+m4.metric("Invited", len(jd_invited))
+m5.metric("Reviewed", sum(1 for r in jd_rows if r["cv"] in st.session_state.decisions))
 
 if invalid_rows:
     st.info(
