@@ -6,6 +6,8 @@ pydantic
 python-dotenv
 pypdf
 pdfplumber
+# UI (python -m streamlit run app.py)
+streamlit
 # tests only (python -m pytest -q tests)
 reportlab
 pytest
