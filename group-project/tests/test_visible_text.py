@@ -1,4 +1,6 @@
 """Guardrail 1: visible_pdf_text drops hidden text and counts it."""
+import pytest
+
 import tools
 from conftest import CLEAN_LINES, WHITE, nonspace
 from pdf_factory import make_pdf
@@ -54,7 +56,11 @@ def test_colour_spaces():
 def test_cache_and_bad_files(pdfs, tmp_path):
     first = tools.visible_pdf_text(str(pdfs["white"]))
     assert tools.visible_pdf_text(str(pdfs["white"])) == first               # cached
-    assert tools.visible_pdf_text(str(tmp_path / "missing.pdf"))[0] == ""
+    # Since 23 Oct, visible_pdf_text raises on a file it can't open (instead of returning "")...
+    with pytest.raises(FileNotFoundError):
+        tools.visible_pdf_text(str(tmp_path / "missing.pdf"))
+    # ...but the agent's tool still turns a missing file into the contract's ERROR code
+    assert tools.parse_resume.invoke({"file": str(tmp_path / "missing.pdf")}).startswith("ERROR: unreadable")
     assert tools.visible_pdf_text(None)[1]["hidden_chars"] == 0
 
 

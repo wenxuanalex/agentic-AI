@@ -320,13 +320,13 @@ def parse_resume(file: str) -> str:
     import parser
 
     problem = _check_file(file)
+    if problem:  # missing / not a PDF / empty: report it before trying to read the file
+        return problem
 
     visible_text, _ = visible_pdf_text(file)
 
     if visible_text.strip() and _looks_like_jd_not_resume(visible_text):
         return "ERROR: not_a_resume (document appears to be a job description)"
-    if problem:
-        return problem
     try:
         result = _run_graph(parser.cv_graph, file)
     except Exception as e:  # unreadable PDF, API failure, size limit, ...

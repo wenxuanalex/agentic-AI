@@ -1,5 +1,6 @@
 """End-to-end batch run on synthetic PDFs, parser and models MOCKED (no API calls):
-load_files -> screen_pair -> rank -> approve -> send_emails, then scores.csv."""
+load_files -> screen_pair -> rank -> approve -> send_emails, then scores.csv.
+Updated 27 Oct for the 23 Oct rules: a CV with hidden text is disqualified (no score, no email)."""
 import csv
 import re
 import sys
@@ -89,19 +90,19 @@ def test_batch_end_to_end(tmp_path, monkeypatch, capsys):
 
     rows = {r["cv"]: r for r in csv.DictReader(open(data / "results" / "scores.csv", encoding="utf-8-sig"))}
     clean, white = rows["C01"], rows["C02"]
-    # Both screened validly; the white-text CV is flagged, the clean one is not
-    assert clean["agent_label"] in ("0", "1") and white["agent_label"] in ("0", "1")
+    # The clean CV is screened and scored normally
+    assert clean["agent_label"] in ("0", "1") and clean["error"] == ""
+    assert clean["hidden_text_chars"] == "0" and clean["hidden_text_sample"] == ""
+    assert float(clean["score"]) > 0
+    # The white-text CV is caught and DISQUALIFIED before any model call (rule since 23 Oct):
+    # flagged with a sample of what was hidden, no score, never ranked or invited
+    assert white["error"] == "disqualified_hidden_text"
     assert int(white["hidden_text_chars"]) > tools.HIDDEN_FLAG_CHARS
     assert white["hidden_text_sample"].startswith("Python SQL Spark")
-    assert clean["hidden_text_chars"] == "0" and clean["hidden_text_sample"] == ""
+    assert white["score"] == "" and white["rank"] == "" and white["final_label"] != "1"
     assert "HIDDEN TEXT" in out and "C02 (" in out
-    # Hidden text earned nothing: no Spark evidence, the hidden soft-skill quote failed,
-    # the parser's 15 years were capped and NUS was not confirmed
-    assert float(white["score"]) <= float(clean["score"])
-    assert white["skills_min"] == clean["skills_min"]
-    assert white["soft_skills"] == clean["soft_skills"] == "0.5"
-    assert "capped" in white["why"] and "not confirmed" in white["why"]
-    assert white["university"] == "0.25" and white["years_min"] == "1.0"
-    # rank -> approve -> send_emails ran: one invite (top 50% of 2), one rejection
-    assert sorted(e["tool"] for e in tools.EMAIL_LOG) == ["email_applicant", "email_invite"]
-    assert "sent (mock): 2" in out
+    # rank -> approve -> send_emails ran: the clean CV gets exactly one email (invite if it was
+    # eligible, rejection if not); the disqualified CV gets none
+    expected = "email_invite" if clean["final_label"] == "1" else "email_applicant"
+    assert [(e["tool"], e["candidate_id"]) for e in tools.EMAIL_LOG] == [(expected, 1)]
+    assert "sent (mock): 1" in out
