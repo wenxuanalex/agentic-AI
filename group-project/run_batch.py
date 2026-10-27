@@ -118,14 +118,15 @@ def main() -> int:
         hidden = {r["cv"]: r.get("hidden_text_chars", 0) for r in out["results"]
                   if r.get("hidden_text_chars", 0) > tools.HIDDEN_FLAG_CHARS}
         flag = lambda cv_id: f"  HIDDEN TEXT ({hidden[cv_id]} chars)" if cv_id in hidden else ""
-        print(f"\nSHORTLIST (top {out['invite_share']:.0%} of valid applicants per JD, by score):")
+        print(f"\nSHORTLIST (top {out['invite_share']:.0%} of ELIGIBLE applicants per JD, by score; "
+              "eligible = agent label 1, no error, no hidden text):")
         for jd_id, ids in out["shortlist"].items():
             print(f"  {jd_id} {roles[jd_id]}")
             for cv_id in ids:
                 row = next(r for r in out["results"] if r["jd"] == jd_id and r["cv"] == cv_id)
                 print(f"      {cv_id} score {row['score']:>5}  {files[cv_id]}{flag(cv_id)}")
             if not ids:
-                print("      (nobody: no valid scored candidates)")
+                print("      (nobody: no eligible candidates)")
         if hidden:
             print(f"\nHIDDEN TEXT found in {len(hidden)} CV(s): "
                   + ", ".join(f"{c} ({n} chars)" for c, n in sorted(hidden.items()))
@@ -168,13 +169,23 @@ def main() -> int:
     tin = sum(r["tokens_in"] for r in out["results"]); tout = sum(r["tokens_out"] for r in out["results"])
     cost = (tin * adapter.PRICE_IN_PER_M + tout * adapter.PRICE_OUT_PER_M) / 1e6
     print("\n" + "=" * 78)
-    print(f"{'JD':<5}{'valid CVs':>10}{'invited (1)':>13}{'not (0)':>9}{'invalid':>9}   invited (score)")
+    # Counts come from the graph's own results (out["ranking"], out["shortlist"]) and use the
+    # same groups as batch.rank_results and batch.send_emails, so they always match the emails.
+    print(f"{'JD':<5}{'screened':>9}{'emailed':>9}{'eligible':>10}{'invited':>9}{'rejected':>10}"
+          f"{'excluded':>10}   invited (score)")
     for jd in out["jds"]:
         rs = [r for r in out["results"] if r["jd"] == jd["id"]]
-        valid = sum(r["label"] in ("0", "1") for r in rs)
-        inv = out["shortlist"][jd["id"]]
+        # emailed = what send_emails contacts: a decision (0/1), a score, and no error or hidden text
+        emailed = [r for r in rs if r["label"] in ("0", "1") and not r.get("error")
+                   and r.get("score") is not None and batch.hidden_text_count(r) == 0]
+        eligible = out["ranking"][jd["id"]]          # agent label 1, ranked by rank_results
+        inv = out["shortlist"][jd["id"]]             # top share of eligible
         top = ", ".join(f"{cv}:{next(r['score'] for r in rs if r['cv'] == cv)}" for cv in inv)
-        print(f"{jd['id']:<5}{valid:>10}{len(inv):>13}{valid - len(inv):>9}{len(rs) - valid:>9}   {top}")
+        print(f"{jd['id']:<5}{len(rs):>9}{len(emailed):>9}{len(eligible):>10}{len(inv):>9}"
+              f"{len(emailed) - len(inv):>10}{len(rs) - len(emailed):>10}   {top}")
+    print("screened = all pairs | emailed = got an invite or rejection | eligible = agent label 1 (ranked)"
+          "\ninvited = top share of eligible | rejected = emailed - invited | excluded = invalid input,"
+          " error or hidden text (no email)")
     skipped = [c["id"] for c in out["cvs"] if c["status"] != "ok"]
     print(f"\nCV files skipped: {len(skipped)} ({', '.join(skipped) or '-'})")
     print(f"emails: {'sent (mock): ' + str(len(out.get('emails', []))) if out.get('approved') else 'NOT sent (not approved)'}")
