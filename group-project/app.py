@@ -223,27 +223,23 @@ with st.expander("Batch", expanded=not (paused or finished)):
     cvs = u1.file_uploader("CV files (PDF)", type="pdf", accept_multiple_files=True, key="cv_up")
     jds_up = u2.file_uploader("JD files (PDF)", type="pdf", accept_multiple_files=True, key="jd_up")
 
-    if st.button("Stage files"):
-        n_cv = save_uploads(cvs or [], CV_DIR)
-        n_jd = save_uploads(jds_up or [], JD_DIR)
-        st.success(f"Staged {n_cv} CV(s) and {n_jd} JD(s).")
-
+    # Uploads are saved straight into data/. Screen the uploaded files, or everything in data/ if none uploaded.
+    save_uploads(cvs or [], CV_DIR)
+    save_uploads(jds_up or [], JD_DIR)
     have_cv = sorted(CV_DIR.glob("*.pdf")) if CV_DIR.exists() else []
     have_jd = sorted(JD_DIR.glob("*.pdf")) if JD_DIR.exists() else []
-    st.caption(f"In place: {len(have_cv)} CV(s), {len(have_jd)} JD(s)")
+    up_cv = {f.name for f in cvs or []}
+    up_jd = {f.name for f in jds_up or []}
+    cv_ids = [f"C{i:02d}" for i, f in enumerate(have_cv, 1) if not up_cv or f.name in up_cv]
+    jd_ids = [f"J{i}" for i, f in enumerate(have_jd, 1) if not up_jd or f.name in up_jd]
 
-    c1, c2, c3 = st.columns(3)
-    max_cv = c1.number_input("CVs to screen", 1, max(len(have_cv), 1), min(2, max(len(have_cv), 1)))
-    max_jd = c2.number_input("JDs to screen", 1, max(len(have_jd), 1), min(1, max(len(have_jd), 1)))
-    planning = c3.checkbox("Planning mode (cheaper)", value=False)
-
-    pairs = int(max_cv) * int(max_jd)
+    planning = st.checkbox("Planning mode (cheaper)", value=False)
+    pairs = len(cv_ids) * len(jd_ids)
     per_pair = EST_COST_PER_PAIR_PLAN if planning else EST_COST_PER_PAIR
-    st.caption(f"{pairs} pair(s), about ${pairs * per_pair:.2f} and {pairs * 1.5:.0f} minutes")
+    st.caption(f"{len(cv_ids)} CV(s) x {len(jd_ids)} JD(s) = {pairs} pair(s), "
+               f"about ${pairs * per_pair:.2f} and {pairs * 1.5:.0f} minutes")
 
-    if st.button("Run screening", type="primary", disabled=not (have_cv and have_jd)):
-        cv_ids = [f"C{i:02d}" for i in range(1, int(max_cv) + 1)]
-        jd_ids = [f"J{i}" for i in range(1, int(max_jd) + 1)]
+    if st.button("Run screening", type="primary", disabled=not pairs):
         with st.spinner(f"Screening {pairs} pair(s). Do not refresh this page."):
             t0 = time.perf_counter()
             try:
