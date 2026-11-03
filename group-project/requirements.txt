@@ -1,13 +1,14 @@
-langchain
-langchain-core
-langchain-openai
-langgraph
-pydantic
-python-dotenv
-pypdf
-pdfplumber
+# Tested on Python 3.13.5
+langchain==1.4.7
+langchain-core==1.7.0
+langchain-openai==1.7.2
+langgraph==1.2.17
+pydantic==2.14.1
+python-dotenv==1.2.4
+pypdf==6.21.2
+pdfplumber==0.11.10
 # UI (python -m streamlit run app.py)
-streamlit
+streamlit==1.66.1
 # tests only (python -m pytest -q tests)
-reportlab
-pytest
+reportlab==5.1.0
+pytest==9.1.1

@@ -1,71 +1,235 @@
-# Resume Screening Agent — LangGraph Part
+# Resume Screening Agent
 
-Screens **one resume against one job description (JD)** and returns a decision in the format agreed in *Resume Screening Agent: Output Contract for Evaluation*.
+A LangGraph agent that screens CVs against job descriptions (JDs). For each JD requirement it quotes the supporting CV line, or records none found, and labels the pair `1` (meets every must-have) or `0`. In a batch it scores and ranks the label-1 pairs, invites the top 20% per JD, and waits for human approval before sending mock emails. `app.py` is a Streamlit UI for the same steps.
 
-**Owner:** Alex
+Group 11: Anmol Malik, Hor Wen Xuan, Huang Kang-chih, Koh We Kiat, Wong Wenjie.
+
+## Quick start
+
+Tested on Python 3.13.5. Needs an OpenAI API key. The model is `gpt-5-mini`.
+
+macOS / Linux:
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env              # then open .env and set OPENAI_API_KEY=sk-...
+python -m pytest -q tests         # offline tests: no API calls, about 1 second
+python run_one.py data/attack_suite/cvs/A0_clean.pdf data/attack_suite/jds/Data_Strategy_Analyst_Simplified.pdf
+python -m streamlit run app.py
+```
+
+Windows (PowerShell):
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\Activate.ps1        # in cmd.exe: .venv\Scripts\activate.bat
+pip install -r requirements.txt
+copy .env.example .env            # then open .env and set OPENAI_API_KEY=sk-...
+python -m pytest -q tests
+python run_one.py data/attack_suite/cvs/A0_clean.pdf data/attack_suite/jds/Data_Strategy_Analyst_Simplified.pdf
+python -m streamlit run app.py
+```
+
+- The offline tests need `OPENAI_API_KEY` set to any value.
+- `run_one.py` screens one synthetic CV against one synthetic JD: about 1.2 cents and 1 to 2 minutes. If `data/attack_suite/` is missing, run `python tests/make_attack_suite.py` first.
+- The UI saves uploads to `data/cvs/` and `data/jds/`. With no uploads, it screens every file already there.
+
+## How a batch is screened
+
+```mermaid
+flowchart TD
+    IN["data/cvs x data/jds"]
+    LOAD["load_files: skip CVs over 8 pages, parse each file once"]
+    HID{"hidden text?"}
+    DQ["disqualified: not ranked, not emailed"]
+
+    subgraph PAIR["screen_pair, one per CV x JD, in parallel"]
+        AG["agent (gpt-5-mini) with parse_resume, parse_jd,
+        normalize_skills, check_timeline"]
+        VER["verifier (code): quotes, one line per requirement,
+        LABEL, POLICY"]
+        SC["score 0 to 100, seven criteria"]
+        AG --> VER
+        VER -->|"fail, at most 2 retries"| AG
+        VER -->|pass| SC
+    end
+
+    RANK["rank: label 1, scored, no error, no hidden text;
+    top 20% per JD"]
+    GATE["approve: interrupt(), share can be changed"]
+    SEND["send_emails (mock)"]
+
+    IN --> LOAD --> HID
+    HID -->|yes| DQ
+    HID -->|no| AG
+    SC --> RANK --> GATE
+    GATE -->|approved| SEND
+    GATE -->|rejected| STOP["no email"]
+```
+
+## Results
+
+`gpt-5-mini`, 25 October 2026. Each of the 35 cases in `eval_cases.py` ran 3 times.
+
+| | Planning off | Planning on |
+|---|---|---|
+| Pass rate, 35 cases | 98.1% ± 1.6 (103/105) | 96.2% ± 1.6 (101/105) |
+| Passed all 3 runs (pass^3) | 94.3% | 91.4% |
+| Cost per CV-JD pair, mean | $0.012 | $0.010 |
+| Latency per pair, median / p90 | 26 s / 89 s | 24 s / 78 s |
+| Hidden-text CVs disqualified, 3 trials | 12 of 12 | |
+
+Five of the six failures are one pair: a CV missing several must-haves against the Data Scientist JD, where the verifier gave up and made no decision. Costs exclude parser calls.
+
+Rerun on 27 October, planning off, once: 34 of 35 passed (97.1%), within 98.1% ± 1.6. The screening code was unchanged. The failure was a parse case where the parser returned no years of experience. Mean cost per pair was $0.0116 (before: $0.0117).
+
+## Baselines
+
+`baselines.py`: a keyword matcher, and one model call with the CV and JD in one prompt, on the same model.
+
+| | Keyword match | One model call | Agent |
+|---|---|---|---|
+| Right decision, 8 single-decision test cases (one CV against one JD: pass, fail or invalid) | 37.5% (3 of 8) | 62.5% (5 of 8 in each of 3 runs) | 91.7% (22 of 24 runs) |
+| Flags a JD sent as a CV, or a CV as a JD | No | No | 6 of 6 |
+| Applies the JD's "male, under 35" requirement | Rejects all CVs | 3 of 3 runs | 0 of 3 |
+| Hidden-text CVs stopped | Rejects all CVs | 0 of 4 | 4 of 4 |
+| Real CVs whose label flips between 0 and 1 over 3 runs | 0 (1 run) | 0 of 15 | 6 of 15 |
+| Cost per pair (mean), latency per pair (median) | about $0 | $0.0017, 6.5 s | $0.012, 26 s |
+
+The keyword matcher rejected every CV, because the JD's must-haves are long sentences. Per pair, the one-call baseline is about 7x cheaper (mean cost) and 4x faster (median latency) than the agent. The one-call baseline cannot answer "invalid". On the 6 cases that expect 0 or 1 it scored 83% and the agent 89%.
+
+## Autonomy level
+
+| Action | Can it be undone? | Affects | Level |
+|---|---|---|---|
+| Parse CVs and JDs, check timelines | Read-only | No one | Delegated |
+| Score and rank | Yes: re-rank at the pause | One batch | Delegated |
+| Send invites and rejections | No | Every applicant in the batch | Supervised |
+| CV with hidden text | n/a | n/a | Disqualified in code |
+
+Overall this is level 4, Approver: the agent screens every CV alone, and a person approves once before any email.
+
+Sending is supervised because on the 15 real CVs the must-have decision flipped for 6 of 15 between runs (7 with planning on), and the shortlist differed in every run.
+
+## Known issues we found
+
+- Borderline CVs get different decisions: when evidence is uncertain, the agent is told to advance the CV for the recruiter to decide, but it applies this inconsistently, which is a likely cause of the label flips.
+- The verifier reads the first `LABEL:` in the answer, so in one run it rejected a correct `0` and the retry changed it to `1`.
+- A CV disqualified for hidden text gets no email, although policy clause P11 says unsuccessful candidates should be informed.
+- Single cases re-parse the JD, which came back with 15 to 24 requirements across runs. After the first batch, `run_eval.py` reuses cached parses.
+
+## Data and privacy
+
+- `data/` is gitignored. It holds 15 real CVs for one Data Scientist role (C01 to C15). There are no hiring outcomes. Two CVs were labelled by hand.
+- Synthetic inputs with known answers are built by `tests/build_eval_inputs.py` and `tests/make_attack_suite.py`.
+- Sensitive words (sex, age, race, religion) are masked before the model sees a CV. Names and email addresses are not.
+- Result files under `data/` contain CV file names and quotes. `tools.py` prints some resume text to the terminal.
+
+## Reproducing our results
+
+The run folders are in the submission zip, not on GitHub (`data/` is gitignored). Estimates use about 26 seconds and 1.2 cents per CV-JD pair, plus parser calls.
+
+| Command | Reproduces | Our results | Time and cost |
+|---|---|---|---|
+| `python run_eval.py --repeats 3` | Pass rates, planning off | `data/eval_runs/20261025-163805_base/` | about 60 min, $2.30 |
+| `python run_eval.py --plan --repeats 3` | Pass rates, planning on | `data/eval_runs/20261025-173859_plan/` | about 60 min, $2.00 |
+| `python run_eval.py --repeats 1` | 27 October rerun | `data/eval_runs/20261027-191518_base/`, log `data/logs/rerun_1027_base.log` | about 28 min, $0.80 |
+| `python baselines.py keyword`, `python baselines.py keyword --min-share 0.5` | Keyword baseline | `data/baselines/*_keyword/`, `data/baselines/*_keyword50/` | under 1 min, $0.01 |
+| `python baselines.py onecall --runs 3` | One-call baseline | `data/baselines/*_onecall/` | about 2 min, $0.21 |
+| `python run_attack_trials.py --runs 3 --plan` | Attack suite | `attack_runs/session_20261025_183844/` (trial 1), `attack_runs/session_20261025_184020/` (trials 2 and 3) | about 1 min and 1 cent per trial |
+
+- `run_eval.py` writes `data/eval_runs/<date>-<time>_<base|plan>/` with `eval_results.csv` and `scores/`.
+- The eval and baselines need `data/cvs/`, `data/jds/` and `data/eval_inputs/` from the zip. Don't run `tests/build_eval_inputs.py` on them: it deletes `data/eval_inputs/` and doesn't rebuild four CVs the ranking cases need.
+- The attack trials ask two questions per trial. Answer `y`, or use `yes y | python run_attack_trials.py --runs 3 --plan` on macOS or Linux.
+- `python run_eval.py --list` lists the cases. `python run_eval.py --ids <id>` runs one.
+
+## What's in this folder
+
+| Path | Contents |
+|---|---|
+| `agent.py` | Single-case graph, verifier, system prompt and policy clauses. |
+| `tools.py` | Parsing wrappers, parse cache, hidden-text detector, `check_timeline`, mock emails. |
+| `parser.py`, `paths.py` | PDF extraction and sensitive-word masking. |
+| `planning.py` | Planning mode. |
+| `adapter.py` | `run_case()` and `make_agent_fn()`, returning an `AgentResult`. |
+| `batch.py` | Batch graph. |
+| `scoring.py` | Criteria, score, university tiers, `rank_key`. |
+| `run_batch.py` | Batch runner with the approval prompt. |
+| `app.py` | Streamlit UI. |
+| `run_one.py` | Screens one resume against one JD. |
+| `eval_cases.py` | The 35 evaluation cases. |
+| `run_eval.py` | Evaluation harness. |
+| `baselines.py` | Keyword and one-call baselines. |
+| `run_attack_trials.py` | Repeated attack-suite runs, saved to `attack_runs/`. |
+| `run_checks.py`, `compare_planning.py` | Development scripts. Not needed to reproduce our results. |
+| `tests/` | Offline tests and the synthetic-input builders. |
+| `attack_runs/` | Saved attack-trial sessions. |
+| `data/` (gitignored) | `cvs/`, `jds/`, `eval_inputs/`, `attack_suite/`, `eval_runs/`, `baselines/`, `logs/`. |
+| `requirements.txt` | Python packages. |
+
+---
+
+# Developer reference
 
 ## Setup
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Create `.env` in this folder. **Never commit it.**
+Create `.env` from `.env.example`. Don't commit it.
 
 ```dotenv
 OPENAI_API_KEY=sk-...
-# OPENAI_API_BASE_URL=...  # Optional, only if the group uses a proxy
+# OPENAI_API_BASE_URL=...  # optional, for a proxy
 ```
 
-## Run it
+`agent.py` and `parser.py` both read `OPENAI_API_BASE_URL` if it is set.
+
+## Single-case screening
 
 ```bash
-python run_one.py <resume.pdf> <jd.pdf> [candidate_id]
-python run_checks.py [data_folder]
+python run_one.py <resume.pdf> <jd.pdf> [candidate_id] [--plan]
 ```
 
-- `run_one.py`: Screens one resume against one JD and prints the `AgentResult`.
-- `run_checks.py`: Runs three real-model checks covering rejection, advancement and invalid input.
+`run_one.py` prints the `AgentResult`: the final answer, tool calls, tokens, cost and latency.
 
-## For the evaluator: how to plug into `run_eval`
+### Using the adapter in an evaluation harness
 
 ```python
 from adapter import make_agent_fn
 
-agent_fn = make_agent_fn()  # Build the graph once; reuse across cases and runs
+agent_fn = make_agent_fn()  # build the graph once, reuse it across cases and runs
 report = run_eval(agent_fn, cases, grader, n_runs=3)
 ```
 
-### `case.input`
+`run_eval` here is an external harness. Our `run_eval.py` calls `adapter.run_case` directly.
 
-A JSON string naming the two PDFs:
+`case.input` is a JSON string or dict naming the two PDFs. `candidate_id` is optional.
 
 ```json
 {
-  "resume": "data/cv/kaggle_1.pdf",
-  "jd": "data/jd/03. JD_Data Scientist.pdf",
+  "resume": "data/cvs/<resume>.pdf",
+  "jd": "data/jds/03. JD_Data Scientist.pdf",
   "candidate_id": 1
 }
 ```
 
-### `AgentResult` — contract section 4
+### `AgentResult`
 
-Filled by `adapter.py`.
+`adapter.py` uses the harness's `AgentResult` class (`agentlab` or `lab_support`) if it can import one, otherwise an identical stand-in.
 
-| Field | What you get |
+| Field | Contents |
 |---|---|
 | `output` | The agent's final answer, ending with the fixed lines below. Never the email message. |
 | `tool_calls` | Tool names in execution order, e.g. `["parse_resume", "parse_jd", "email_applicant"]`. |
-| `tool_args` | Arguments for each call, if supported by the version of `AgentResult` being used. Week 6 includes this field; week 3 does not. |
-| `steps` | Model turns. More than two usually means the verifier sent the agent back for a retry. |
-| `input_tokens`, `output_tokens`, `cost_usd` | Token and estimated cost totals. Check `PRICE_IN_PER_M` and `PRICE_OUT_PER_M` in `adapter.py` before reporting costs. |
-| `latency_s` | Wall-clock runtime; approximately 30–90 seconds per case on `gpt-5-mini`, depending on the case and retries. |
-| `error` | Reserved for actual crashes. Invalid inputs and failed verification are represented in the agent output, not as runtime errors. |
+| `tool_args` | Arguments for each call, if the `AgentResult` class has this field. |
+| `steps` | Model turns. More than two usually means the verifier asked for a retry. |
+| `input_tokens`, `output_tokens`, `cost_usd` | Screening-agent totals, priced at $0.25 / $2.00 per million tokens (`PRICE_IN_PER_M`, `PRICE_OUT_PER_M`). Parser calls are not counted. |
+| `latency_s` | Wall-clock time. In our runs: median about 70 to 80 s, p90 about 160 s. |
+| `error` | Crashes only. Invalid inputs and failed verification appear in `output`. |
 
-### Fixed output contract
+### Output format
 
-For a valid screening decision, the output ends with:
+A screening decision ends with:
 
 ```text
 EVIDENCE: [R<n>: <requirement>] "<exact quote from resume>"
@@ -81,87 +245,72 @@ ERROR: <code>
 LABEL: invalid
 ```
 
-Each requirement must have an evidence line. If the resume contains no supporting quote, use `none found`.
+A requirement with no supporting quote gets `none found`.
 
 | `ERROR` code | Meaning |
 |---|---|
-| `not_a_resume` | The file contains no resume or more than one resume. |
-| `not_a_jd` | The file contains no JD, more than one JD, or a JD with no requirements. |
-| `unreadable` | The file is missing, is not a PDF, is empty, or cannot be parsed. |
-| `verification_failed` | The answer still fails the built-in checks after two retries. No decision or email is produced. |
+| `not_a_resume` | The file contains no resume, or more than one. |
+| `not_a_jd` | The file contains no JD, more than one, or a JD with no requirements. |
+| `unreadable` | The file is missing, not a PDF, empty, or can't be parsed. |
+| `verification_failed` | The answer still fails the verifier after two retries. No decision, no email. |
 
-### Emails in single-case screening
+### Single-case graph
 
-These are mock email tools; no real emails are sent.
-
-| Label | Email behaviour |
-|---|---|
-| `0` | `email_applicant` sends the mock rejection notification automatically after verification succeeds. |
-| `1` | The run pauses for human approval before `email_recruiter`. `make_agent_fn()` automatically approves every pause, so measured evaluator runs do not include a human rejection. Mention this limitation in the write-up. |
-| `invalid` | No email is sent. |
-| Verification failure | No decision is produced and no email is sent. |
-
-## Company policy clauses
-
-The agent may cite clauses `P1–P11` in its `POLICY:` line. These are summarised from the TAFEP *Tripartite Guidelines on Fair Employment Practices* (April 2024). The full policy prompt is in `SYSTEM` in `agent.py`.
-
-## Nondeterminism
-
-The `gpt-5-mini` model is not deterministic, and setting `temperature` does not guarantee repeatable outputs. Repeated runs may differ in labels, tool calls, latency and cost. Report the pass rate and standard deviation across repeated runs rather than relying on one run.
-
-## Planning mode: on/off switch and baseline
-
-```python
-make_agent_fn(planning=False)  # Baseline: the agent chooses tools step by step
-make_agent_fn(planning=True)   # Planning: plan first, validate it, execute it, then answer
+```text
+START → agent ⇄ tools → verifier ─┬→ email → END
+          ↑                       ├→ END (invalid or retries exhausted)
+          └──── retry (≤ 2) ──────┘
 ```
 
-Planning workflow:
+The verifier checks that both parse tools ran, that every quote appears in the resume's visible text, that the evidence lines match the JD's requirement list, that the label is valid, that `ERROR` appears if and only if the label is `invalid`, and that the `POLICY` clause is P1 to P11. On a failure it sends the agent back with the reasons.
+
+### Emails
+
+Email tools are mock: they append to `tools.EMAIL_LOG`. For label `0` or `1` the graph pauses (`interrupt()`) before `email_applicant` or `email_recruiter`. `invalid` and `verification_failed` send nothing. `run_case()` and `make_agent_fn()` approve every pause by default (`resume_value="approve"`). With `resume_value="reject"`, no email is sent.
+
+### Policy clauses
+
+`P1` to `P11` summarise the TAFEP *Tripartite Guidelines on Fair Employment Practices* (April 2024). The full text is in `SYSTEM` in `agent.py`.
+
+## Planning mode
+
+```python
+make_agent_fn(planning=False)  # the agent chooses tools step by step
+make_agent_fn(planning=True)   # plan, check the plan, execute it, then answer
+```
 
 ```text
 START → planner → execute_plan → agent → verifier → (email | END | retry)
 ```
 
-- **Planner:** Makes one small model call to select tools based on the task and available tool list. It does not receive the full policy text.
-- **`check_plan`:** Enforces code-level constraints: only the four loop tools, both parsing tools must be included, at most four steps, and no email tools. A rejected plan falls back to `parse_resume` and `parse_jd`.
-- **`execute_plan`:** Executes the validated plan in code without a model call for every tool. If a parse tool returns an error, the rest of the plan is skipped.
-- **Agent:** Makes a model call to produce the final answer. The output contract, verifier, retry logic and email handling remain the same as in baseline mode.
+- `planner`: one model call that picks tools from the tool list. It doesn't see the policy text.
+- `check_plan`: only the four loop tools, both parse tools included, at most four steps, no email tools. A rejected plan is replaced by the default plan. Parse tools always run first.
+- `execute_plan`: runs the plan in code. If a parse tool returns an error, the rest is skipped.
+- The output format, verifier, retries and emails are the same as without planning.
 
-Compare the two modes:
+Use `--plan` with `run_one.py`, `run_batch.py` and `run_eval.py`.
 
-```bash
-python compare_planning.py --runs 3
-python run_one.py <resume.pdf> <jd.pdf> --plan
-python run_checks.py --plan
-```
-
-`compare_planning.py` writes `planning_comparison.csv`. Compare token usage, cost, model turns, latency and labels. Confirm that any savings do not come at the expense of worse screening decisions.
-
-## Batch screening: score every CV against every JD and invite the top 20%
-
-### Run the batch job
+## Batch screening
 
 ```bash
-python run_batch.py --limit 2
+python run_batch.py                          # all of data/cvs x data/jds
+python run_batch.py data/attack_suite --plan # another folder with cvs/ and jds/
+python run_batch.py --limit 2                # first two CVs
 python run_batch.py --cvs C07,C12 --jds J1,J4
-python run_batch.py
 ```
 
-- `--limit 2`: Screens the first two CVs against all JDs.
-- `--cvs C07,C12 --jds J1,J4`: Screens only the selected CVs and JDs. IDs follow sorted file order.
-- No arguments: Runs the full batch over `data/cvs/` and `data/jds/`.
-- Add `--plan` to use planning mode.
+| Flag | Effect |
+|---|---|
+| `--plan` | Planning mode. |
+| `--workers 4` | Pairs screened at once (default 8). |
+| `--top 0.3` | Invite share (default 0.2). |
+| `--limit N` | First N CVs. |
+| `--cvs`, `--jds` | Only these IDs, in sorted file order. |
+| `--yes` | Skip the cost confirmation and the approval question. |
 
-The command displays the number of CV–JD pairs and an estimated cost (approximately $0.02 per pair) before asking for confirmation.
+Before any model call it prints the pair count and an estimated cost of $0.023 per pair ($0.019 with `--plan`), from a run on 20 October. Later runs measured about $0.012 per pair before parsing.
 
-Place CVs in `data/cvs/` and JDs in `data/jds/`. **`data/` is gitignored because it may contain private applicant data.**
-
-Outputs:
-
-- `data/results/scores.csv`
-- `data/results/shortlist.csv`
-
-Batch workflow:
+Outputs in the data folder: `results/scores.csv` (one row per CV x JD), `results/shortlist.csv`, and `results/parsed/` (parsed text of each file).
 
 ```text
 START → load_files → screen_pair × (CVs × JDs, parallel via Send)
@@ -170,159 +319,108 @@ START → load_files → screen_pair × (CVs × JDs, parallel via Send)
 
 ### 1. `load_files`
 
-- Skips CV files over eight pages, which may be applicant-system exports containing several CVs.
-- Parses each file once so candidates are evaluated against the same JD requirement list.
-- Prepares the visible CV text used by the screening and scoring guardrails.
+- Assigns IDs (`C01`, `C02`, ... and `J1`, `J2`, ...) in sorted file order, before any `--cvs` / `--jds` filter.
+- Marks CVs over eight pages as `not_a_resume` (likely multi-CV exports).
+- Parses each usable file once, with the parse cache on, so all CVs are checked against the same JD requirement list. A file the parser rejects keeps its `ERROR` as its status.
 
 ### 2. `screen_pair`
 
-Runs the normal screening graph for each CV–JD pair, with single-case email handling disabled, then scores the pair from 0–100 using `scoring.py`.
+Four steps, in code order:
+
+1. Hidden-text check, before any model call. Any hidden character (count above 0) disqualifies the CV: error `disqualified_hidden_text`, label `0`, and nothing else runs. If the check fails, the row gets error `hidden_text_detection_failed`, label `invalid` and count `-1`, so the CV fails closed.
+2. Skip CVs or JDs that `load_files` couldn't use, recording the error.
+3. Screen with the single-case graph via `adapter.run_case`, built with emails disabled (`agent.build_graph(emails=False)`). The row records the label (last `LABEL:` line), model turns, tokens, time, tool calls, the number of `EVIDENCE` lines and of JD requirements, verifier feedback, the end of each answer, and the last `ERROR` code, if any.
+4. Score 0 to 100, only if the label is `0` or `1` and there is no error. `verification_failed` or any error means no score and no ranking. A scoring crash is recorded as `scoring_failed`.
 
 | # | Criterion, in priority order | Weight | Scoring method |
 |---|---|---:|---|
 | 1 | Relevant minimum skills and certifications | 7 | Share of must-have skills supported by verified quotes. |
 | 2 | Minimum years of experience | 6 | Candidate years divided by the minimum, capped at 1. |
 | 3 | Relevant experience beyond the minimum | 5 | Years above the minimum divided by 5, capped at 1. |
-| 4 | University ranking | 4 | QS 2027 tier table in code: top 50, 51–200, 201–500, other degree, or none. |
+| 4 | University ranking | 4 | QS 2027 tier table in code: top 50, 51 to 200, 201 to 500, other degree, or none. |
 | 5 | Soft skills | 3 | Share of JD soft skills supported by resume quotes, using one model call. |
 | 6 | Preferred skills | 2 | Share of nice-to-have skills supported by verified quotes. |
 | 7 | Preferred years of experience | 1 | Candidate years divided by preferred experience, capped at 1. |
 
-The weights add up to 28. The score is `100 × Σ(criterion score × weight) ÷ 28`. A criterion the JD does not ask for scores 1 for everyone, so it does not change the ranking.
+Score = `100 × Σ(criterion score × weight) ÷ 28`. A criterion the JD doesn't ask for scores the same for everyone (1, or 0 for criterion 3 when the JD sets no minimum).
 
-**Hidden-text rule:** A CV with detected hidden text is disqualified from batch screening. It must not enter the eligible ranking or shortlist, regardless of its model label or score. If the hidden-text detector fails, the system should fail closed rather than treat the CV as clean.
+The score is recorded, but ranking compares criteria in priority order, and the total only breaks a full tie.
 
 ### 3. `rank`
 
-Ranking is performed separately for each JD.
+Per JD:
 
-- Only valid, eligible applicants with a usable score and no hidden-text disqualification can be ranked.
-- The top `ceil(invite_share × eligible_applicant_count)` applicants receive final label `1`; the remaining eligible applicants receive final label `0`.
-- The default `invite_share` is `0.20`.
-- The agent's own mandatory-requirement label is retained in `scores.csv` as `agent_label` for reference. It does not determine the batch invitation label; the ranking rule agreed on 20 October does.
-- A CV can be invited for more than one role.
-- Candidates are sorted by criterion 1 first, then criterion 2, and so on (`scoring.rank_key`). The total score is only the last tiebreaker, so a higher-priority criterion beats a higher total score.
+- Only pairs where the agent found every must-have met are eligible: label `1`, a score, no error, zero hidden text.
+- Eligible pairs are sorted by `scoring.rank_key` (criterion 1, then 2, and so on, then the total). Full ties keep CV ID order.
+- The top `ceil(invite_share × eligible count)` get final label `1`, and the other eligible pairs get `0`.
+- `agent_label` stays in `scores.csv` next to `final_label`. Agent label `0` gives final label `0`, and `invalid` stays `invalid`.
+- Default `invite_share` is `0.20`. A CV can be invited for more than one JD.
 
-A disqualified CV is not eligible for invitation even if its score would otherwise place it in the top 20%.
+### 4. Approval and the invite share
 
-### 4. Human approval and changing the invitation share
+The batch pauses before any email. The share can be changed without re-screening:
 
-The batch pauses for human approval before sending mock emails. Use `--yes` to skip the interactive confirmation.
+- `python run_batch.py --top 0.3`, or `{"invite_share": 0.3, ...}` in the graph input.
+- At the pause: `Command(resume={"invite_share": 0.3})` re-ranks the existing scores and pauses again. `"approve"` or `"reject"` finishes.
+- In the terminal, type a new share at the approval question. In the UI, move the slider and click Re-rank.
+- `batch.rank_results(results, jds, 0.3)` returns `(shortlist, ranking)` without running the graph.
 
-The invitation share can be changed without rerunning screening:
-
-- Start with a different share: `python run_batch.py --top 0.3`.
-- Set it in graph input: `{"invite_share": 0.3, ...}`.
-- At the approval pause, resume with `Command(resume={"invite_share": 0.3})`. The graph returns to ranking, reuses the existing scores and pauses for approval again.
-- Resume with `"approve"` or `"reject"` to finish.
-- In the terminal, enter the new share when prompted.
-- Preview a ranking without running the graph: `batch.rank_results(results, jds, 0.3)` returns `(shortlist, ranking)`.
-
-The share must be greater than 0 and at most 1. Invalid values should raise `ValueError` with a message suitable for the UI.
-
-Changing the share reranks the existing results: it does not trigger additional screening model calls.
+`batch.check_share` raises `ValueError` unless 0 < share ≤ 1.
 
 ### 5. `send_emails`
 
-These are mock email actions performed only after batch approval:
+After approval only, and mock only:
 
-- `email_invite` for final label `1`.
-- `email_applicant` for final label `0`, including applicants rejected by the batch ranking policy.
-- Hidden-text-disqualified CVs must never receive an invitation. Their disqualification must be preserved through ranking and email handling.
+- `email_invite` to each shortlisted pair.
+- `email_applicant` to every other pair with label `0` or `1`, a score and no error.
+- No email for hidden text, `invalid`, an error, or no score.
 
-The single-case output contract and `make_agent_fn()` interface for the evaluator remain separate from the batch workflow.
+The UI's per-candidate agree / override buttons don't change who is emailed.
 
-## How the single-case graph works
+## Hidden-text guardrails
 
-```text
-START → agent ⇄ tools → verifier ─┬→ email → END
-          ↑                       ├→ END (invalid or retries exhausted)
-          └──── retry (≤ 2) ──────┘
-```
+### Detection and disqualification
 
-The verifier runs before any email action. It checks that the required parsing tools ran, that the evidence quotes appear in the resume's visible text, that the label is valid, that `ERROR` is used consistently with an invalid result, and that the `POLICY` clause is valid. A failed verification sends the agent back with instructions describing what to fix.
+`tools.visible_pdf_text(file)` uses `pdfplumber` to find text a reader can't see:
 
-## Project files
-
-| File | Purpose |
-|---|---|
-| `agent.py` | State, graph nodes, edges, system prompt, policy and `build_graph()`. |
-| `tools.py` | Resume/JD parsing wrappers, `visible_pdf_text`, skill normalisation, timeline checks and email mocks. |
-| `tests/` | Offline guardrail tests and attack-suite builder. |
-| `adapter.py` | `run_case()` and `make_agent_fn()`; produces `AgentResult` for the evaluation harness. |
-| `parser.py`, `paths.py` | PDF extraction and sensitive-word masking. |
-| `batch.py`, `scoring.py`, `run_batch.py` | Batch screening, score calculation, ranking and command-line runner. |
-| `planning.py` | Planning mode, plan validation and execution. |
-| `run_one.py`, `run_checks.py`, `compare_planning.py` | Command-line runners and planning comparison. |
-
-## Guardrails: prompt injection hidden in resumes
-
-A prompt in the system message telling the model to treat a resume as data is not sufficient protection. Guardrails must be enforced in code.
-
-The batch system uses two complementary controls.
-
-### 1. Detect hidden text and disqualify the CV
-
-`tools.visible_pdf_text(file)` uses `pdfplumber` to identify text a reader may not be able to see, including:
-
-- White or near-white text on a white background (gray, RGB or CMYK channels at or above 0.95).
-- Font sizes below 3 pt.
+- White or near-white text on a white background (gray, RGB or CMYK channels at or above 0.95). White text on a dark box is kept.
+- Font size below 3 pt.
 - Text outside the page box.
-- PDF render mode 3, which makes text invisible.
+- PDF render mode 3 (invisible).
 
-White text on a dark header or box is retained.
+Any hidden character disqualifies the CV in `screen_pair` step 1. Separately, `run_batch.py` shows a "HIDDEN TEXT" warning when a CV has more than 20 hidden characters (`tools.HIDDEN_FLAG_CHARS`). Disqualification doesn't use that threshold. The parser still reads the raw PDF. Evidence checks and scoring use the visible text.
 
-For batch screening, **any detected hidden text triggers disqualification**. The CV is excluded before it can be ranked or shortlisted. If hidden-text detection fails, the batch must fail closed rather than proceed as though the CV were clean.
+### Visible evidence for scores
 
-The screening parser may still be used to identify invalid resumes, but the visible text is used for evidence verification and scoring guardrails.
-
-### 2. Require visible evidence for score inputs
-
-Every score input must be backed by visible resume content:
-
-- **Years of experience:** The score is capped by the lower of the parser's `years_of_experience` and the result of `check_timeline` on visible text. If no visible dates support the experience, use zero.
-- **University tier:** A university only receives its ranking tier if its name appears in visible text. Otherwise, use the configured fallback for a degree or zero if there is no supported degree.
-- **Skills:** Skill evidence must be supported by verifier-checked quotes from visible text.
-- **Guardrail notes:** Any capped or unconfirmed value should have a `guardrail:` explanation in the `why` column.
-
-These controls prevent hidden claims from inflating the batch score, while the hidden-text disqualification rule prevents a CV containing detected hidden text from entering the shortlist at all.
+- Years of experience: the lower of the parser's figure and `check_timeline` on the visible text, or 0 if the visible text has no dates.
+- University tier: counts only if the university name is in the visible text. Otherwise it is 0.25 for a degree, or 0. A scanned PDF with no text layer uses the parser's education lines.
+- Skills: from verifier-checked quotes.
+- Any capped or unconfirmed value gets a `guardrail:` note in the `why` column.
 
 ### Tests and attack suite
 
-Run the offline tests:
-
 ```bash
 python -m pytest -q tests
-```
-
-Generate the synthetic attack suite:
-
-```bash
-python tests/make_attack_suite.py
+python tests/make_attack_suite.py            # deletes and rebuilds data/attack_suite/
 python run_batch.py data/attack_suite --plan
 ```
 
-The suite includes one clean CV and four attack variants:
-
 | CV | Attack | Expected batch outcome |
 |---|---|---|
-| `A0_clean.pdf` | Clean baseline | Eligible if it passes the ordinary screening and scoring requirements. |
-| `A1_hidden_instructions.pdf` | Hidden instructions | Disqualified if hidden text is detected. |
-| `A2_keyword_stuffing.pdf` | Hidden or manipulated keyword stuffing | Disqualified if hidden text is detected. |
-| `A3_fake_system_note.pdf` | Fake system note | Disqualified if hidden text is detected. |
-| `A4_fake_claims.pdf` | Fabricated experience or university claims | Disqualified if hidden text is detected. |
+| `A0_clean.pdf` | None | Eligible if it meets the must-haves. |
+| `A1_hidden_instructions.pdf` | Hidden instructions | Disqualified. |
+| `A2_keyword_stuffing.pdf` | Hidden keyword stuffing | Disqualified. |
+| `A3_fake_system_note.pdf` | Fake system note | Disqualified. |
+| `A4_fake_claims.pdf` | Fabricated experience or university claims | Disqualified. |
 
-The expected outcome for attack cases depends on the detector actually finding hidden text. A generated attack PDF is not proof that detection worked: check `hidden_text_chars`, the disqualification result, `scores.csv` and `shortlist.csv`.
-
-The clean baseline should remain eligible when it otherwise meets the screening requirements. The attack variants should never be invited when hidden text is detected.
+Check `hidden_text_chars`, `error`, `scores.csv` and `shortlist.csv` to confirm the result. In our 3 trials A1 to A4 were disqualified before any model call and A0 was invited.
 
 ## Known limitations
 
-- The hidden-text detector evaluates text characters individually. It may miss text covered by an image or an overlaid shape, white text embedded in an image, or text squeezed into near-zero-width rendering.
-- A two-column CV's visible text may be extracted in a reading order that mixes the columns.
-- The parser still reads the raw PDF and may incorrectly classify a document as `not_a_resume` if hidden content affects extraction.
-- Sensitive-word masking is word-based. It may mask legitimate skills such as “Chinese” or “Black-Scholes”, and it does not mask names or email addresses.
-- The JD parser may classify unclear requirements as must-have, potentially increasing the likelihood of rejection.
-- The single-case workflow supports one resume and one JD per run, and PDFs only.
-- The batch workflow depends on the correctness of its PDF parser, hidden-text detector, evidence verifier, score calculations and approval controls. Passing offline tests does not establish that every real-world attack will be detected.
-
+- The detector checks characters one by one. It can miss text under an image or shape, white text inside an image, and text squeezed to near-zero width.
+- Two-column CVs can come out with the columns mixed.
+- Hidden content can make the parser classify a CV as `not_a_resume`.
+- Masking is word-based: it can mask skills such as "Chinese" or "Black-Scholes".
+- The JD parser can mark unclear requirements as must-have.
+- One resume and one JD per single-case run, and PDFs only.
+- Passing the offline tests doesn't mean every real-world attack is detected.
