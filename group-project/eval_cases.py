@@ -79,7 +79,7 @@ CASES = [
          {"folder": MINI, "answers": ["y", "n"], "top": REAL_TOP},
          {"email_count": 0}, note="human rejects the shortlist -> nothing is sent"),
 
-        # ===== GOAL 2: soft-constraint ranking (weights 6,5,4,3,2,1) =====
+        # ===== GOAL 2: soft-constraint ranking (weights 7,6,5,4,3,2,1) =====
     # Ranking tests must use candidates who both pass mandatory screening.
     # The hard-gate behavior is tested separately under GOAL 4 and GOAL 5.
 

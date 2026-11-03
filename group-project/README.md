@@ -180,12 +180,15 @@ Runs the normal screening graph for each CV–JD pair, with single-case email ha
 
 | # | Criterion, in priority order | Weight | Scoring method |
 |---|---|---:|---|
-| 1 | Relevant minimum skills and certifications | 6 | Share of must-have skills supported by verified quotes. |
-| 2 | Minimum years of experience | 5 | Candidate years divided by the minimum, capped at 1. |
-| 3 | University ranking | 4 | QS 2027 tier table in code: top 50, 51–200, 201–500, other degree, or none. |
-| 4 | Soft skills | 3 | Share of JD soft skills supported by resume quotes, using one model call. |
-| 5 | Preferred skills | 2 | Share of nice-to-have skills supported by verified quotes. |
-| 6 | Preferred years of experience | 1 | Candidate years divided by preferred experience, capped at 1. |
+| 1 | Relevant minimum skills and certifications | 7 | Share of must-have skills supported by verified quotes. |
+| 2 | Minimum years of experience | 6 | Candidate years divided by the minimum, capped at 1. |
+| 3 | Relevant experience beyond the minimum | 5 | Years above the minimum divided by 5, capped at 1. |
+| 4 | University ranking | 4 | QS 2027 tier table in code: top 50, 51–200, 201–500, other degree, or none. |
+| 5 | Soft skills | 3 | Share of JD soft skills supported by resume quotes, using one model call. |
+| 6 | Preferred skills | 2 | Share of nice-to-have skills supported by verified quotes. |
+| 7 | Preferred years of experience | 1 | Candidate years divided by preferred experience, capped at 1. |
+
+The weights add up to 28. The score is `100 × Σ(criterion score × weight) ÷ 28`. A criterion the JD does not ask for scores 1 for everyone, so it does not change the ranking.
 
 **Hidden-text rule:** A CV with detected hidden text is disqualified from batch screening. It must not enter the eligible ranking or shortlist, regardless of its model label or score. If the hidden-text detector fails, the system should fail closed rather than treat the CV as clean.
 
@@ -198,7 +201,7 @@ Ranking is performed separately for each JD.
 - The default `invite_share` is `0.20`.
 - The agent's own mandatory-requirement label is retained in `scores.csv` as `agent_label` for reference. It does not determine the batch invitation label; the ranking rule agreed on 20 October does.
 - A CV can be invited for more than one role.
-- Ties are broken using the criteria in priority order, beginning with criterion 1.
+- Candidates are sorted by criterion 1 first, then criterion 2, and so on (`scoring.rank_key`). The total score is only the last tiebreaker, so a higher-priority criterion beats a higher total score.
 
 A disqualified CV is not eligible for invitation even if its score would otherwise place it in the top 20%.
 

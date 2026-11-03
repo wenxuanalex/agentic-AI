@@ -14,7 +14,7 @@ Usage (from this folder, with OPENAI_API_KEY in .env):
     ahead (--yes skips the question). Planning mode (--plan) uses fewer tokens.
 
 Writes (inside the data folder, which is gitignored - the files hold applicant file names):
-    <data>/results/scores.csv      one row per CV x JD: label, score, six criteria, why, tokens
+    <data>/results/scores.csv      one row per CV x JD: label, score, seven criteria, why, tokens
     <data>/results/shortlist.csv   who is invited to which JD
 """
 from __future__ import annotations

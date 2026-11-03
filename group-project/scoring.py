@@ -1,13 +1,13 @@
 """Score one resume against one JD (batch mode), using the group's soft-constraint list.
 
-Criteria, in priority order (handwritten notes). Weights 6..1, so a higher-priority
+Criteria, in priority order (handwritten notes). Weights 7..1, so a higher-priority
 criterion always counts more. Each criterion scores 0-1; the total is 0-100.
 
   #  criterion                              weight  how it is scored
-  1  relevant skills (minimum) + certs        6     share of MUST-HAVE skill requirements with a
+  1  relevant skills (minimum) + certs        7     share of MUST-HAVE skill requirements with a
                                                     verified EVIDENCE quote (from the agent's answer)
-  2  years of experience (minimum)            5     candidate years / minimum years (capped at 1)
-  3  relevant experience beyond minimum       4     additional years beyond the minimum, capped at 5
+  2  years of experience (minimum)            6     candidate years / minimum years (capped at 1)
+  3  relevant experience beyond minimum       5     additional years beyond the minimum, capped at 5
   4  university ranking                       4     tier from UNIVERSITY_TIERS (QS 2027) - code, no model
   5  soft skills                              3     share of the JD's soft skills with a quote that
                                                     really appears in the resume (one small model call)
@@ -258,7 +258,7 @@ def soft_skills_score(jd, resume_text: str, resume_file: str | None = None) -> t
 
 # ---------------------------------------------------------------- total
 def score_pair(cv, jd, resume_text: str, agent_output: str, resume_file: str | None = None) -> dict:
-    """All six criteria + the weighted total (0-100) for one CV x JD pair.
+    """All seven criteria + the weighted total (0-100) for one CV x JD pair.
     Guardrail 2: years and university must be backed by the resume's VISIBLE text (code, no model)."""
     import tools
     visible = tools.visible_pdf_text(resume_file)[0] if tools.has_text_layer(resume_file) else None
