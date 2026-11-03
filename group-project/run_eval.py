@@ -8,7 +8,9 @@
 
     Phases: single cases run in parallel (--workers); parse / rank / invariance / batch cases run one at a time
     because run_batch.main() is driven in-process (argv, input and EMAIL_LOG are global).
-    Output: data/eval_runs/eval_results_<baseline|plan>.csv, one row per case x repeat, with
+    Output: each run gets its own folder, data/eval_runs/<YYYYmmdd-HHMMSS>_<base|plan>/, never overwritten:
+    eval_results.csv (one row per case x repeat, appended as each run finishes) and scores/ (each batch's
+    scores.csv and shortlist.csv). eval_results.csv columns include
     cluster      what the case probes (static, from eval_cases.py)
     fail_reason  what went wrong THIS run (first failing check); all_reasons lists every failing check
     Status: PASS | FAIL | PARTIAL (passed, but a check could not be measured) | SKIP (TODO or missing input).
@@ -27,6 +29,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from pypdf import PdfReader
@@ -47,8 +50,11 @@ ap.add_argument("--goals", default="", help="e.g. 1,4")
 ap.add_argument("--clusters", default="", help="e.g. policy_bias,coverage")
 ap.add_argument("--ids", default="", help="e.g. email_reject_sent,rank_skills_min")
 ap.add_argument("--list", action="store_true")
+ap.add_argument("--save-output", action="store_true",
+                help="single cases: save the agent's answer to <run folder>/outputs/<case_id>_r<rep>.txt")
 ARGS = ap.parse_args()
 DATA = Path(ARGS.data)
+RUN_DIR: Path | None = None   # set in main(): data/eval_runs/<timestamp>_<base|plan>/
 
 from eval_cases import CASES, CLUSTERS  # noqa: E402
 
@@ -103,13 +109,37 @@ def label_reason(want, got):
     return "label_mismatch"
 
 
+def save_output(c, rep, r, trace):
+    """--save-output: AgentResult.output, plus every answer the agent wrote and the verifier's feedback.
+    When retries run out, adapter.run_case replaces .output with 'ERROR: verification_failed', so the
+    rejected answers are only in the trace. Written under data/ (gitignored): it quotes the CV."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    import adapter
+    msgs = (trace or {}).get("messages", [])
+    answers = [adapter._text(m.content) for m in msgs
+               if isinstance(m, AIMessage) and not m.tool_calls and m.name not in ("planner", "plan_executor")]
+    feedback = [adapter._text(m.content) for m in msgs if isinstance(m, HumanMessage)][1:]
+    parts = [f"case: {c.id}  rep: {rep}  steps: {r.steps}  tools: {r.tool_calls}  error: {r.error}",
+             "", "===== AgentResult.output =====", r.output or "(empty)"]
+    for i, a in enumerate(answers, start=1):
+        parts += ["", f"===== agent answer {i} of {len(answers)} =====", a]
+        if i <= len(feedback):
+            parts += ["", f"===== verifier feedback after answer {i} =====", feedback[i - 1]]
+    out = RUN_DIR / "outputs"
+    out.mkdir(exist_ok=True)
+    (out / f"{c.id}_r{rep}.txt").write_text("\n".join(parts), encoding="utf-8")
+
+
 def do_single(c, rep, graph):
     import adapter
     t0 = time.perf_counter()
     inp, exp = c.inputs, c.expect
+    trace = {} if ARGS.save_output else None
     r = adapter.run_case(json.dumps({"resume": str(DATA / inp["resume"]), "jd": str(DATA / inp["jd"]),
                                     "candidate_id": 1}),
-                        graph=graph, resume_value=inp.get("resume_value", "approve"))
+                        graph=graph, resume_value=inp.get("resume_value", "approve"), trace=trace)
+    if ARGS.save_output:
+        save_output(c, rep, r, trace)
     if r.error:
         return verdict(c, rep, [("crash", r.error)], [], t0, r.cost_usd)
     out = r.output
@@ -292,9 +322,10 @@ def run_batch_folder(folder: Path, top, answers, rep):
     scores = folder / "results" / "scores.csv"
     if br["error"] is None and scores.is_file():
         br["rows"] = read_csv(scores)
-        runs = DATA / "eval_runs"
-        runs.mkdir(exist_ok=True)
-        shutil.copy(scores, runs / f"scores_{folder.name}_{'plan' if ARGS.plan else 'base'}_r{rep}_{len(_batch_cache)}.csv")
+        tag = f"{len(_batch_cache) + 1:03d}_{folder.name}_r{rep}"
+        shutil.copy(scores, RUN_DIR / "scores" / f"scores_{tag}.csv")
+        if (folder / "results" / "shortlist.csv").is_file():
+            shutil.copy(folder / "results" / "shortlist.csv", RUN_DIR / "scores" / f"shortlist_{tag}.csv")
     elif br["error"] is None:
         br["error"] = "scores.csv was not written"
     _batch_cache[key] = br
@@ -634,6 +665,18 @@ def main():
             print(f"goal {c.goal}  {c.cluster:<18} {c.kind:<10} {c.id}")
         print(f"{len(cases)} cases")
         return 0
+    global RUN_DIR
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S}_{'plan' if ARGS.plan else 'base'}"
+    RUN_DIR, n = DATA / "eval_runs" / stamp, 1
+    while RUN_DIR.exists():                      # two runs in the same second: never reuse a folder
+        n += 1
+        RUN_DIR = DATA / "eval_runs" / f"{stamp}_{n}"
+    (RUN_DIR / "scores").mkdir(parents=True)
+    path = RUN_DIR / "eval_results.csv"
+    fields = ["id", "goal", "cluster", "kind", "rep", "status", "fail_reason", "all_reasons", "detail",
+              "secs", "cost_usd"]
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        csv.DictWriter(f, fieldnames=fields).writeheader()
     import agent as screening
     graph = screening.build_graph(planning=ARGS.plan)
     jobs = [(c, rep) for c in cases for rep in range(1, ARGS.repeats + 1)]
@@ -649,6 +692,8 @@ def main():
         print(f"[{done}/{len(jobs)}] {r['id']} rep{r['rep']}: {r['status']}"
             + (f" ({r['fail_reason']})" if r["fail_reason"] else ""), flush=True)
         results.append(r)
+        with open(path, "a", newline="", encoding="utf-8-sig") as f:   # one row at a time: a crash keeps the rows so far
+            csv.DictWriter(f, fieldnames=fields).writerow(r)
 
     with ThreadPoolExecutor(ARGS.workers) as pool:
         for r in pool.map(lambda j: dispatch(j[0], j[1], graph), singles):
@@ -656,13 +701,6 @@ def main():
     for c, rep in others:
         report(dispatch(c, rep, graph))
 
-    out = DATA / "eval_runs"
-    out.mkdir(exist_ok=True)
-    path = out / f"eval_results_{'plan' if ARGS.plan else 'baseline'}.csv"
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=list(results[0].keys()) if results else ["id"])
-        w.writeheader()
-        w.writerows(results)
     summarize(results)
     print(f"\nwritten: {path}")
     return 0
